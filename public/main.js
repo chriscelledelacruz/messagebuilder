@@ -1,6 +1,14 @@
 const form = document.getElementById("form");
 const list = document.getElementById("list");
 const status = document.getElementById("status");
+const profileCsvInput = document.getElementById("profileCsv");
+const profileCsvFileName = document.getElementById("profileCsvFileName");
+
+if (profileCsvInput) {
+  profileCsvInput.addEventListener("change", () => {
+    profileCsvFileName.textContent = profileCsvInput.files.length > 0 ? profileCsvInput.files[0].name : "No file selected";
+  });
+}
 
 // File input elements
 const taskCsvInput = document.getElementById("taskCsv");
