@@ -364,14 +364,14 @@ app.get("/api/items", async (req, res) => {
               
               if (deptMatch && deptMatch[1]) {
                   // FIX: Trust the extracted text directly. 
-                  item.department = deptMatch[1].trim(); 
+                  item.department = deptMatch[1](); 
               } 
               // Fallback: Check 'kicker' (where you save it) OR 'teaser'
               else if (p.contents?.en_US?.kicker) {
-                  item.department = p.contents.en_US.kicker.trim();
+                  item.department = p.contents.en_US.kicker();
               }
               else if (p.contents?.en_US?.teaser) {
-                  item.department = p.contents.en_US.teaser.trim();
+                  item.department = p.contents.en_US.teaser();
               }
               
               
