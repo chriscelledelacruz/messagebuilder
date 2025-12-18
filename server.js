@@ -220,6 +220,44 @@ app.post("/api/create", cpUpload, async (req, res) => {
         });
         taskListHTML += "</ul>";
       }
+
+      let profileMergeHTML = "";
+    if (req.files && req.files['profileCsv']) {
+      try {
+        const profileText = req.files['profileCsv'][0].buffer.toString("utf8");
+        const rows = profileText.split(/\r?\n/).map(r => r.trim()).filter(Boolean);
+        
+        if (rows.length >= 2) { 
+          const headers = rows[0].split(/[;,]/); 
+          const firstDataRow = rows[1].split(/[;,]/);
+          
+          profileMergeHTML = `<h3>Field Merge Guide (First Row)</h3>
+            <table border="1" style="border-collapse: collapse; width: 100%; font-size: 0.9em;">
+              <tr style="background: #f4f6f8;">
+                <th style="padding: 8px;">Profile Field (ID)</th>
+                <th style="padding: 8px;">Staffbase Format (Copy/Paste)</th>
+                <th style="padding: 8px;">Example Value</th>
+              </tr>`;
+          
+          headers.forEach((header, index) => {
+            const cleanHeader = header.trim();
+            const exampleValue = firstDataRow[index] ? firstDataRow[index].trim() : "";
+            const sbPlaceholder = `{{user.profile.${cleanHeader}}}`;
+            
+            profileMergeHTML += `
+              <tr>
+                <td style="padding: 8px;"><code>${cleanHeader}</code></td>
+                <td style="padding: 8px;"><code>${sbPlaceholder}</code></td>
+                <td style="padding: 8px; color: #666;">${exampleValue}</td>
+              </tr>`;
+          });
+          
+          profileMergeHTML += `</table><br>`;
+        }
+      } catch (err) {
+        console.error("Error parsing profile first row:", err);
+      }
+
     }
     // --- NEW SECTION END ---
 
