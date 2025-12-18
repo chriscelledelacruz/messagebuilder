@@ -390,7 +390,7 @@ app.get("/api/items", async (req, res) => {
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
             }
-          } catch(e) { console.error(e); }
+          } catch(e) { console.error("Task Error:", e); throw e; }
           items.push(item);
         }
       }
