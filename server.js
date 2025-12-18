@@ -295,6 +295,12 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
 // 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
+  // FIX 1: DISABLE CACHING TO SOLVE 304 ERRORS
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.set('Surrogate-Control', 'no-store');
+
   try {
     const items = [];
     let offset = 0; const limit = 100;
@@ -353,15 +359,16 @@ app.get("/api/items", async (req, res) => {
               const p = posts.data[0];
               let rawContent = p.contents?.en_US?.content || "";
               
-              // --- FIX: TEXT-FIRST STRATEGY ---
+              // --- FIX 2: IMPROVED TEXT-FIRST REGEX STRATEGY ---
               // 1. Strip ALL HTML tags to get pure text.
               // Example: "<p><strong>Category:</strong> HR</p>" -> "Category: HR"
               const plainText = rawContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
               
               console.log(`[Item ${item.channelId}] Extracted Text: "${plainText}"`);
 
-              // 2. Extract Department using text matching
-              const deptMatch = plainText.match(/Category:\s*([^Targeted]*)/i);
+              // 2. Extract Department using Robust "Look-Ahead" Regex
+              // Reads "Category:" then everything until "Targeted Stores:"
+              const deptMatch = plainText.match(/Category:\s*(.*?)(?=\s*Targeted Stores:|$)/i);
               if (deptMatch && deptMatch[1]) {
                  item.department = deptMatch[1].trim();
               } else if (p.contents?.en_US?.teaser) {
