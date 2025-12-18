@@ -15,10 +15,6 @@ const STAFFBASE_BASE_URL = process.env.STAFFBASE_BASE_URL;
 const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
 const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
 const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
-// The ID of the Tasks Plugin Installation where Task Lists are defined generally
-// If you create lists inside specific Store Projects, this might be dynamic. 
-// For this POC, we use a central ID or discover dynamic ones.
-const TASKS_PLUGIN_ID = "tasks"; 
 
 // --- API HELPER ---
 async function sb(method, path, body) {
@@ -71,10 +67,8 @@ function parseTaskCSV(buffer) {
     lines.forEach(line => {
       const [title, desc, date] = line.split(';').map(s => s ? s.trim() : '');
       if (title) {
-        // Simple date formatter (assuming input is YYYY-MM-DD or similar)
         let dueDate = null;
         if(date) dueDate = new Date(date).toISOString();
-        
         tasks.push({ title, description: desc || "", dueDate });
       }
     });
@@ -97,7 +91,6 @@ async function discoverProjectsByStoreIds(storeIds) {
 
     res.data.forEach(inst => {
       const title = inst.config?.localization?.en_US?.title || "";
-      // Check if title is like "Store 12345"
       const match = title.match(/^Store\s+(\w+)$/i);
       if(match) {
         const sId = match[1];
@@ -124,8 +117,6 @@ app.post("/api/verify-users", async (req, res) => {
     const foundUsers = [];
     const notFoundIds = [];
 
-    // Parallel processing for speed in POC (be careful with rate limits in Prod)
-    // For safer execution, use a for...of loop
     for (const id of storeIds) {
       const user = await findUserByHiddenId(id);
       if (user) {
@@ -145,42 +136,47 @@ app.post("/api/verify-users", async (req, res) => {
   }
 });
 
-// 2. CREATE ADHOC POST (The Main Chain)
+// 2. CREATE ADHOC POST (Updated with specific error reporting)
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
     let { storeIds, title, department } = req.body;
     
-    // Parse storeIds if stringified
     if (typeof storeIds === 'string') {
       try { storeIds = JSON.parse(storeIds); } catch(e) {}
     }
 
     if (!storeIds || storeIds.length === 0) return res.status(400).json({ error: "No stores provided" });
 
-    // A. Resolve Users
+    // A. Resolve Users & Track Failures
     const userIds = [];
+    const failedIds = []; // Track IDs that fail resolution
+    
     for (const id of storeIds) {
       const user = await findUserByHiddenId(id);
-      if (user) userIds.push(user.id);
+      if (user) {
+        userIds.push(user.id);
+      } else {
+        failedIds.push(id);
+      }
     }
-    if (userIds.length === 0) return res.status(404).json({ error: "No valid users found for these stores." });
+
+    // ERROR REPORTING UPDATE: Return specific failed IDs
+    if (userIds.length === 0) {
+      return res.status(404).json({ 
+        error: `No valid users found. The following IDs could not be resolved: ${failedIds.join(', ')}` 
+      });
+    }
 
     // B. Generate Metadata
     const now = Date.now();
-    // Format: adhoc_v2|timestamp|userCount|department
-    // We store this in externalID so it's hidden from the UI but searchable by us
     const metaExternalID = `adhoc_v2|${now}|${userIds.length}|${department.replace(/\|/g, '-')}`;
 
-    // C. Create Channel (CLEAN TITLE)
-    // We put the "ugly" metadata in externalID, and the clean title in localization
+    // C. Create Channel
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
       config: {
-        localization: { 
-          en_US: { title: title }, 
-          de_DE: { title: title } 
-        }
+        localization: { en_US: { title: title }, de_DE: { title: title } }
       },
       accessorIDs: userIds
     });
@@ -198,23 +194,19 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       }
     });
 
-    // E. Handle Tasks (If CSV present)
+    // E. Handle Tasks
     let taskCount = 0;
     if (req.file) {
       const tasks = parseTaskCSV(req.file.buffer);
       if (tasks.length > 0) {
-        // 1. Find target projects (Store Installations)
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
         
-        // 2. Loop through store projects and create list + tasks
         for (const instId of installationIds) {
           try {
-            // Create List
             const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
             const listId = listRes.id;
             
-            // Create Tasks in List
             for (const t of tasks) {
               await sb("POST", `/tasks/${instId}/task`, {
                 taskListId: listId,
@@ -241,63 +233,69 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   }
 });
 
-// 3. GET ITEMS (Past Submissions)
+// 3. GET ITEMS (Hybrid: V2 + Legacy)
 app.get("/api/items", async (req, res) => {
   try {
     const items = [];
     let offset = 0;
     const limit = 100;
 
-    // 1. Fetch all News Installations
     while(true) {
       const result = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
       if (!result.data || result.data.length === 0) break;
 
-      // 2. Filter for our "Adhoc" channels using the externalID prefix
-      const adhocChannels = result.data.filter(i => 
-        i.pluginID === 'news' && i.externalID && i.externalID.startsWith('adhoc_v2|')
-      );
+      for (const inst of result.data) {
+        if (inst.pluginID !== 'news') continue;
 
-      // 3. Hydrate with Status
-      for (const channel of adhocChannels) {
-        // Parse metadata: adhoc_v2|timestamp|userCount|department
-        const parts = channel.externalID.split('|');
-        const timestamp = parseInt(parts[1]);
-        const userCount = parts[2];
-        const department = parts[3];
-        const title = channel.config?.localization?.en_US?.title || "Untitled";
+        let item = null;
+        const title = inst.config?.localization?.en_US?.title || "Untitled";
+        const extID = inst.externalID || "";
 
-        // Get Posts to determine status
-        let status = "Draft";
-        let postId = null;
-        try {
-          const posts = await sb("GET", `/channels/${channel.id}/posts?limit=1`);
-          if (posts.data && posts.data.length > 0) {
-            const p = posts.data[0];
-            postId = p.id;
-            if (p.published) status = "Published";
-            else if (p.planned) status = "Scheduled";
+        // Strategy A: New V2
+        if (extID.startsWith('adhoc_v2|')) {
+          const parts = extID.split('|');
+          item = {
+            channelId: inst.id,
+            title: title,
+            department: parts[3] || "General",
+            userCount: parts[2] || "0",
+            createdAt: new Date(parseInt(parts[1])).toISOString(),
+            status: "Draft"
+          };
+        } 
+        // Strategy B: Legacy
+        else if (title.startsWith('[external]')) {
+          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
+          if (match) {
+            item = {
+              channelId: inst.id,
+              title: match[4],
+              department: match[3],
+              userCount: match[1],
+              createdAt: inst.created || new Date().toISOString(),
+              status: "Draft"
+            };
           }
-        } catch(e) {}
+        }
 
-        items.push({
-          channelId: channel.id,
-          title,
-          department,
-          userCount,
-          createdAt: new Date(timestamp).toISOString(),
-          status,
-          postId
-        });
+        if (item) {
+          try {
+            const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
+            if (posts.data && posts.data.length > 0) {
+              const p = posts.data[0];
+              if (p.published) item.status = "Published";
+              else if (p.planned) item.status = "Scheduled";
+            }
+          } catch(e) {}
+          items.push(item);
+        }
       }
 
       if (result.data.length < limit) break;
       offset += limit;
     }
 
-    // Sort by date desc
     items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
-
     res.json({ items });
   } catch (err) {
     console.error(err);
