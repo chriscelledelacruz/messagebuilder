@@ -236,7 +236,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
     // B. Create Post (Embed Metadata reliably)
     // We add spaces inside the HTML to help the parser later
-    const contentHTML = `<p><strong>Category:</strong> ${department}</p> <p><strong>Targeted Stores:</strong> ${userIds.length}</p><hr>${taskListHTML}`; 
+    const contentHTML = `<p>Category: ${department} Targeted Stores: ${userIds.length}</p><hr>${taskListHTML}`; 
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
