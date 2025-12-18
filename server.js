@@ -157,14 +157,13 @@ app.post("/api/create", cpUpload, async (req, res) => {
   try {
     let { verifiedUsers, title, department } = req.body;
 
-    // --- FIX: Logic cleanup ---
+    // --- Cleanup Inputs ---
     if (!department || department === 'undefined' || department.trim() === '') {
         department = "Uncategorized";
     }
     if (typeof verifiedUsers === 'string') {
       try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
-
     if (!verifiedUsers || verifiedUsers.length === 0) {
       return res.status(400).json({ error: "No verified users provided." });
     }
@@ -174,7 +173,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
     const now = Date.now();
     const metaExternalID = `adhoc-${now}`;
 
-    // 1. DATA PREPARATION: Parse Tasks and Profile Guide
+    // --- A. Parse Task CSV (if exists) ---
     let taskListHTML = "";
     const taskFile = req.files && req.files['taskCsv'] ? req.files['taskCsv'][0] : null;
     if (taskFile) {
@@ -189,6 +188,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
       }
     }
 
+    // --- B. Parse Profile CSV Guide (if exists) ---
     let profileMergeHTML = "";
     const profileFile = req.files && req.files['profileCsv'] ? req.files['profileCsv'][0] : null;
     if (profileFile) {
@@ -198,7 +198,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
         if (rows.length >= 2) { 
           const headers = rows[0].split(/[;,]/); 
           const firstDataRow = rows[1].split(/[;,]/);
-          profileMergeHTML = `<h3>Field Merge Guide (First Row)</h3><table border="1" style="border-collapse: collapse; width: 100%; font-size: 0.9em;"><tr style="background: #f4f6f8;"><th style="padding: 8px;">Profile Field (ID)</th><th style="padding: 8px;">Format</th><th style="padding: 8px;">Example</th></tr>`;
+          profileMergeHTML = `<h3>Field Merge Guide (First Row)</h3><table border="1" style="border-collapse: collapse; width: 100%; font-size: 0.9em;"><tr style="background: #f4f6f8;"><th style="padding: 8px;">Profile Field (ID)</th><th style="padding: 8px;">SB Format</th><th style="padding: 8px;">Example</th></tr>`;
           headers.forEach((header, index) => {
             const cleanHeader = header.trim();
             profileMergeHTML += `<tr><td style="padding: 8px;"><code>${cleanHeader}</code></td><td style="padding: 8px;"><code>{{user.profile.${cleanHeader}}}</code></td><td style="padding: 8px; color: #666;">${firstDataRow[index] || ""}</td></tr>`;
@@ -208,7 +208,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
       } catch (err) { console.error("Profile parse error:", err); }
     }
 
-    // 2. STAFFBASE CREATION: Channel & Post
+    // --- C. Create Staffbase Channel ---
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
@@ -220,11 +220,12 @@ app.post("/api/create", cpUpload, async (req, res) => {
     const contentHTML = `${title}<hr>${profileMergeHTML}${taskListHTML}`;
     const contentTeaser = `Category: ${department}; Targeted Stores: ${userIds.length}`;
 
+    // --- D. Create Staffbase Post ---
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { en_US: { title, content: contentHTML, teaser: contentTeaser, kicker: department } }
     });
 
-    // 3. BACKGROUND TASKS: Staffbase Tasks & Profile Import
+    // --- E. Handle Task Assignments ---
     let taskCount = 0;
     if (taskFile) {
       const tasks = parseTaskCSV(taskFile.buffer);
@@ -241,6 +242,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
       taskCount = tasks.length * instIds.length;
     }
 
+    // --- F. Handle Profile Import API ---
     let importCount = 0;
     if (profileFile) {
       try {
@@ -256,7 +258,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
 
     res.json({ success: true, channelId, postId: postRes.id, taskCount, importCount });
   } catch (err) {
-    console.error(err);
+    console.error("Create Error:", err);
     res.status(500).json({ error: err.message });
   }
 });
