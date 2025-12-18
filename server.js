@@ -226,6 +226,13 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     
     const channelId = channelRes.id;
 
+    // [FIX] FORCE UPDATE VISIBILITY
+    // Explicitly set the targeting again to ensure it applies.
+    console.log(`Applying visibility to ${userIds.length} users...`);
+    await sb("PUT", `/installations/${channelId}`, {
+      accessorIDs: userIds
+    });
+
     // B. Create Post
     console.log("Creating News Post...");
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
