@@ -151,117 +151,75 @@ app.post("/api/verify-users", async (req, res) => {
 });
 
 // 2. CREATE ADHOC POST & TASKS
-// 2. CREATE ADHOC POST & TASKS
-const cpUpload = upload.fields([{ name: 'taskCsv', maxCount: 1 }, { name: 'profileCsv', maxCount: 1 }]);
-app.post("/api/create", cpUpload, async (req, res) => {
+app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
+    // Debug Incoming Data
+    console.log("[CREATE] Payload:", { 
+      hasFile: !!req.file, 
+      title: req.body.title, 
+      dept: req.body.department 
+    });
+
     let { verifiedUsers, title, department } = req.body;
 
-    // --- Cleanup Inputs ---
+    // --- FIX 2: Prevent "undefined" Department ---
     if (!department || department === 'undefined' || department.trim() === '') {
         department = "Uncategorized";
     }
+
     if (typeof verifiedUsers === 'string') {
       try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
+
+    // Fallback logic if verifying in frontend failed
+    if (!verifiedUsers || verifiedUsers.length === 0) {
+       let { storeIds } = req.body;
+       if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
+       
+       if (storeIds && storeIds.length > 0) {
+         console.log("Fallback: Resolving raw store IDs...");
+         const userMap = await getAllUsersMap();
+         verifiedUsers = [];
+         for(const id of storeIds) {
+           const u = userMap.get(String(id));
+           if(u) verifiedUsers.push(u);
+         }
+       }
+    }
+
     if (!verifiedUsers || verifiedUsers.length === 0) {
       return res.status(400).json({ error: "No verified users provided." });
     }
 
     const userIds = verifiedUsers.map(u => u.id);
     const storeIds = verifiedUsers.map(u => u.csvId);
+
+    console.log(`[CREATE] Final: ${userIds.length} users. Dept: "${department}"`);
+
     const now = Date.now();
     const metaExternalID = `adhoc-${now}`;
 
-    // --- A. Parse Task CSV (if exists) ---
+    // --- NEW SECTION START: Parse Tasks Early ---
+    let tasks = [];
     let taskListHTML = "";
-    const taskFile = req.files && req.files['taskCsv'] ? req.files['taskCsv'][0] : null;
-    if (taskFile) {
-      const tasks = parseTaskCSV(taskFile.buffer);
+    
+    if (req.file) {
+      tasks = parseTaskCSV(req.file.buffer);
+      
       if (tasks.length > 0) {
         taskListHTML = "<h3>Action Items</h3><ul>";
         tasks.forEach(t => {
-          let dateDisplay = t.dueDate ? ` <span style="color:#666; font-size:0.9em;">(Due: ${new Date(t.dueDate).toLocaleDateString()})</span>` : "";
+          // Format date if it exists
+          let dateDisplay = "";
+          if (t.dueDate) {
+             const d = new Date(t.dueDate);
+             dateDisplay = ` <span style="color:#666; font-size:0.9em;">(Due: ${d.toLocaleDateString()})</span>`;
+          }
           taskListHTML += `<li><strong>${t.title}</strong><br>${t.description || ""}${dateDisplay}</li>`;
         });
         taskListHTML += "</ul>";
       }
     }
-
-    // --- B. Parse Profile CSV Guide (if exists) ---
-    let profileMergeHTML = "";
-    const profileFile = req.files && req.files['profileCsv'] ? req.files['profileCsv'][0] : null;
-    if (profileFile) {
-      try {
-        const profileText = profileFile.buffer.toString("utf8");
-        const rows = profileText.split(/\r?\n/).map(r => r.trim()).filter(Boolean);
-        if (rows.length >= 2) { 
-          const headers = rows[0].split(/[;,]/); 
-          const firstDataRow = rows[1].split(/[;,]/);
-          profileMergeHTML = `<h3>Field Merge Guide (First Row)</h3><table border="1" style="border-collapse: collapse; width: 100%; font-size: 0.9em;"><tr style="background: #f4f6f8;"><th style="padding: 8px;">Profile Field (ID)</th><th style="padding: 8px;">SB Format</th><th style="padding: 8px;">Example</th></tr>`;
-          headers.forEach((header, index) => {
-            const cleanHeader = header.trim();
-            profileMergeHTML += `<tr><td style="padding: 8px;"><code>${cleanHeader}</code></td><td style="padding: 8px;"><code>{{user.profile.${cleanHeader}}}</code></td><td style="padding: 8px; color: #666;">${firstDataRow[index] || ""}</td></tr>`;
-          });
-          profileMergeHTML += `</table><br>`;
-        }
-      } catch (err) { console.error("Profile parse error:", err); }
-    }
-
-    // --- C. Create Staffbase Channel ---
-    const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
-      pluginID: "news",
-      externalID: metaExternalID, 
-      config: { localization: { en_US: { title: title }, de_DE: { title: title } } },
-      accessorIDs: userIds
-    });
-    
-    const channelId = channelRes.id;
-    const contentHTML = `${title}<hr>${profileMergeHTML}${taskListHTML}`;
-    const contentTeaser = `Category: ${department}; Targeted Stores: ${userIds.length}`;
-
-    // --- D. Create Staffbase Post ---
-    const postRes = await sb("POST", `/channels/${channelId}/posts`, {
-      contents: { en_US: { title, content: contentHTML, teaser: contentTeaser, kicker: department } }
-    });
-
-    // --- E. Handle Task Assignments ---
-    let taskCount = 0;
-    if (taskFile) {
-      const tasks = parseTaskCSV(taskFile.buffer);
-      const projectMap = await discoverProjectsByStoreIds(storeIds);
-      const instIds = Object.values(projectMap);
-      for (const instId of instIds) {
-        try {
-          const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
-          for (const t of tasks) {
-            await sb("POST", `/tasks/${instId}/task`, { taskListId: listRes.id, title: t.title, description: t.description, dueDate: t.dueDate, status: "OPEN" });
-          }
-        } catch(e) {}
-      }
-      taskCount = tasks.length * instIds.length;
-    }
-
-    // --- F. Handle Profile Import API ---
-    let importCount = 0;
-    if (profileFile) {
-      try {
-        const importUrl = `${STAFFBASE_BASE_URL}/users/imports`;
-        const importRes = await fetch(importUrl, {
-          method: "POST",
-          headers: { "Authorization": `Basic ${STAFFBASE_TOKEN}`, "Content-Type": "text/csv; charset=utf-8" },
-          body: profileFile.buffer
-        });
-        if (importRes.ok) importCount = 1;
-      } catch (err) { console.error("Profile Import Error:", err); }
-    }
-
-    res.json({ success: true, channelId, postId: postRes.id, taskCount, importCount });
-  } catch (err) {
-    console.error("Create Error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
     // --- NEW SECTION END ---
 
     // A. Create Channel
@@ -278,7 +236,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
 
     // B. Create Post (Embed Metadata reliably)
     // We add spaces inside the HTML to help the parser later
-    const contentHTML = `${title}<hr>${profileMergeHTML}${taskListHTML}`;
+    const contentHTML = `${title}<hr>${taskListHTML}`;
     const contentTeaser = `Category: ${department}; Targeted Stores: ${userIds.length}`
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
@@ -322,49 +280,13 @@ app.post("/api/create", cpUpload, async (req, res) => {
       }
     }
 
-    let importCount = 0;
-    if (req.files && req.files['profileCsv']) {
-      try {
-        console.log("Processing Profile CSV Import...");
-        const profileBuffer = req.files['profileCsv'][0].buffer;
-        
-        // We must send this raw buffer to Staffbase
-        // Note: Staffbase import API typically expects the raw CSV content body
-        // and Content-Type: text/csv
-        
-        const importUrl = `${STAFFBASE_BASE_URL}/users/imports`;
-        const importRes = await fetch(importUrl, {
-          method: "POST",
-          headers: {
-            "Authorization": `Basic ${STAFFBASE_TOKEN}`,
-            "Content-Type": "text/csv; charset=utf-8" // Important for CSV upload
-          },
-          body: profileBuffer
-        });
+    res.json({ success: true, channelId, postId: postRes.id, taskCount });
 
-        if (!importRes.ok) {
-          const errText = await importRes.text();
-          console.error("Profile Import Failed:", errText);
-          // We don't throw here to avoid failing the whole post creation, 
-          // but you could add a warning to the response.
-        } else {
-          const importData = await importRes.json();
-          importCount = 1; // Mark as success
-          console.log("Profile Import Success:", importData);
-        }
-      } catch (err) {
-        console.error("Profile Import Error:", err);
-      }
-    }
-
-      res.json({ success: true, channelId, postId: postRes.id, taskCount, importCount });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
-
-
 
 // 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
