@@ -58,7 +58,8 @@ async function batchVerifyUsers(storeIds) {
     try {
       const res = await sb("GET", `/users?externalID=${encodeURIComponent(id)}`);
       if (res.data && res.data.length > 0) {
-        const user = res.data.find(u => u.externalID === id);
+        // Strict match on externalID (String comparison)
+        const user = res.data.find(u => String(u.externalID) === String(id));
         if (user) {
           foundUsers.push({ id: user.id, csvId: id, name: `${user.firstName || ''} ${user.lastName || ''}`.trim() });
         } else {
@@ -128,31 +129,29 @@ app.post("/api/verify-users", async (req, res) => {
   }
 });
 
+// UPDATED CREATE ENDPOINT
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
-    let { storeIds, title, department } = req.body;
-    if (typeof storeIds === 'string') {
-      try { storeIds = JSON.parse(storeIds); } catch(e) {}
-    }
-
-    if (!storeIds || storeIds.length === 0) return res.status(400).json({ error: "No stores provided" });
-
-    // 1. Resolve Users
-    const verification = await batchVerifyUsers(storeIds);
-    const userIds = verification.foundUsers.map(u => u.id);
+    let { verifiedUsers, title, department } = req.body;
     
-    if (userIds.length === 0) {
-      return res.status(404).json({ error: `No valid users found.` });
+    // Parse the JSON string sent from frontend
+    if (typeof verifiedUsers === 'string') {
+      try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
 
-    // 2. Generate Metadata (FIXED: Using Hyphens only)
-    const now = Date.now();
-    // STRIP all non-alphanumeric chars from department to be 100% safe
-    const safeDept = (department || 'General').replace(/[^a-zA-Z0-9]/g, ''); 
-    // New Format: adhoc-v2-{timestamp}-{count}-{department}
-    const metaExternalID = `adhoc-v2-${now}-${userIds.length}-${safeDept}`;
+    if (!verifiedUsers || verifiedUsers.length === 0) {
+      return res.status(400).json({ error: "No verified users provided." });
+    }
 
-    console.log("Generating External ID:", metaExternalID); // Debugging Log
+    // 1. Extract IDs directly (Skip re-verification!)
+    const userIds = verifiedUsers.map(u => u.id); // Internal Staffbase IDs
+    const storeIds = verifiedUsers.map(u => u.csvId); // External Store IDs (for tasks)
+
+    // 2. Generate Metadata
+    const now = Date.now();
+    const safeDept = (department || 'General').replace(/[^a-zA-Z0-9]/g, ''); 
+    // Format: adhoc-v2-{timestamp}-{count}-{department}
+    const metaExternalID = `adhoc-v2-${now}-${userIds.length}-${safeDept}`;
 
     // 3. Create Channel
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
@@ -185,7 +184,6 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
         
-        // Chunk requests to avoid rate limits
         const chunkedInsts = [];
         for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
 
@@ -235,7 +233,6 @@ app.get("/api/items", async (req, res) => {
         const title = inst.config?.localization?.en_US?.title || "Untitled";
         const extID = inst.externalID || "";
 
-        // STRATEGY A: New V2 (Hyphen)
         if (extID.startsWith('adhoc-v2-')) {
           const parts = extID.split('-');
           item = {
@@ -247,18 +244,6 @@ app.get("/api/items", async (req, res) => {
             status: "Draft"
           };
         } 
-        // STRATEGY B: Legacy Support (Pipe or Title)
-        else if (extID.startsWith('adhoc_v2|')) {
-           const parts = extID.split('|');
-           item = {
-             channelId: inst.id,
-             title: title,
-             department: parts[3],
-             userCount: parts[2],
-             createdAt: new Date(parseInt(parts[1])).toISOString(),
-             status: "Draft"
-           };
-        }
         else if (title.startsWith('[external]')) {
           const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
           if (match) {
@@ -293,19 +278,13 @@ app.get("/api/items", async (req, res) => {
     items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ items });
   } catch (err) {
-    console.error(err);
     res.json({ items: [] });
   }
 });
 
-// 4. DELETE
 app.delete("/api/delete/:id", async (req, res) => {
-  try {
-    await sb("DELETE", `/installations/${req.params.id}`);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.use(express.static(path.join(__dirname, "public")));
