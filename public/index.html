@@ -56,7 +56,7 @@
       </div>
 
       <div class="form-group">
-        <label for="department">Category / Department</label>
+        <label for="department">Category</label>
         <select id="department" name="department" required>
           <option value="">Select a category</option>
           <option value="Merchandising">Merchandising</option>
@@ -95,7 +95,7 @@
 
       <div class="form-group">
         <label>Task List (CSV)</label>
-        <span class="sub-label">Cols: <code>Title;Description;Date</code></span>
+        <span class="sub-label">Columns: <code>Title;Description;Date</code></span>
         <div class="file-drop-area">
           <span class="file-msg" id="taskCsvFileName">Drag and drop or click to select CSV</span>
           <input type="file" id="taskCsv" name="taskCsv" accept=".csv">
@@ -113,12 +113,12 @@
   </div>
 
   <div class="section-title-area">
-    <h3>Past Submissions</h3>
+    <h3>Past Messages</h3>
     <button id="toggleFilters" class="post-link" style="margin:0;">Show Filters</button>
   </div>
     
   <div class="filters-container" id="filtersContainer" style="display: none;">
-    <div><label>Department</label><select id="filterDepartment"><option value="">All</option><option value="Marketing">Marketing</option><option value="IT">IT</option><option value="HR">HR</option></select></div>
+    <div><label>Category</label><select id="filterDepartment"><option value="">All</option><option value="Marketing">Marketing</option><option value="IT">IT</option><option value="HR">HR</option></select></div>
     <div><label>Search</label><input type="text" id="filterTitle" placeholder="Title..."></div>
     <div><label>Status</label><select id="filterStatus"><option value="">All</option><option value="draft" selected>Draft</option><option value="published">Published</option></select></div>
     <input type="date" id="filterDateFrom" style="display:none"><input type="date" id="filterDateTo" style="display:none"><select id="sortOrder" style="display:none"><option value="desc">Desc</option></select>
