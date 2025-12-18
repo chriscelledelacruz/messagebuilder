@@ -359,40 +359,21 @@ app.get("/api/items", async (req, res) => {
               // 1. Extract Department
               // Matches "Category:" followed by text until "Targeted" or End
               // 1. Define your valid departments (The "Source of Truth")
-              const validDepartments = ["Merchandising", "Marketing", "Audit", "Operations", "HR", "IT"];
-              
-              // 2. Try to find the string using a slightly more flexible Regex
               // Matches "Category:" OR "Department:"
               const deptMatch = plainText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
               
-              let candidateValue = null;
-              
               if (deptMatch && deptMatch[1]) {
-                  candidateValue = deptMatch[1].trim();
+                  // FIX: Trust the extracted text directly. 
+                  item.department = deptMatch[1].trim(); 
               } 
-              // Only try teaser if we really have to, and honestly, this is risky. 
-              // I would recommend REMOVING this teaser fallback unless your teasers are strictly category names.
+              // Fallback: Check 'kicker' (where you save it) OR 'teaser'
+              else if (p.contents?.en_US?.kicker) {
+                  item.department = p.contents.en_US.kicker.trim();
+              }
               else if (p.contents?.en_US?.teaser) {
-                  candidateValue = p.contents.en_US.teaser.trim();
+                  item.department = p.contents.en_US.teaser.trim();
               }
               
-              // 3. THE VALIDATION STEP (Crucial)
-              // We check if the found text (candidateValue) exists in our valid list (case-insensitive)
-              if (candidateValue) {
-                  // Find the exact spelling from your list (e.g. "hr" -> "HR")
-                  const match = validDepartments.find(d => d.toLowerCase() === candidateValue.toLowerCase());
-                  
-                  if (match) {
-                      item.department = match; // Set it to the clean, valid value
-                  } else {
-                      // We found text, but it wasn't a valid department. 
-                      // Reset to empty string so the user sees "Select a Category" instead of "General"
-                      item.department = ""; 
-                  }
-              } else {
-                  // Nothing found at all. Reset to empty.
-                  item.department = "";
-              } 
               
               //const deptMatch = plainText.match(/Category:\s*(.*?)(?=\s*Targeted Stores|Targeted|$)/i);
               //if (deptMatch && deptMatch[1]) {
