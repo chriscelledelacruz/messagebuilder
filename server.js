@@ -220,7 +220,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
         en_US: { 
           title: title, 
           content: contentHTML, 
-          topic: department 
+          kicker: department 
         } 
       }
     });
