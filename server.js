@@ -6,7 +6,11 @@ require("dotenv").config();
 const app = express();
 
 // Middleware
+// Increased limit for large JSON payloads (thousands of IDs)
 app.use(express.json({ limit: '50mb' })); 
+
+// Multer Setup: We only accept 'taskCsv' now. 
+// The Store list comes in the request body, not as a file.
 const upload = multer({ storage: multer.memoryStorage() });
 
 const STAFFBASE_BASE_URL = process.env.STAFFBASE_BASE_URL;
@@ -14,7 +18,7 @@ const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
 const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
 const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
 
-// --- API HELPER (With Robust Rate Limiting) ---
+// --- API HELPER (With Retry Logic) ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function sb(method, path, body) {
@@ -28,12 +32,13 @@ async function sb(method, path, body) {
   };
   if (body) options.body = JSON.stringify(body);
 
-  let retries = 5;
+  let retries = 3;
   while (retries > 0) {
     const res = await fetch(url, options);
     
+    // Handle Rate Limiting
     if (res.status === 429) {
-      console.warn(`[API 429] Too many requests. Waiting 2s...`);
+      console.warn(`[API 429] Rate limit hit. Waiting 2s...`);
       await delay(2000);
       retries--;
       continue;
@@ -45,17 +50,18 @@ async function sb(method, path, body) {
       throw new Error(`API ${res.status}: ${txt}`);
     }
     
+    // Handle Empty Responses (204)
     if (res.status === 204) return {};
     return res.json();
   }
-  throw new Error("API Timeout after multiple retries");
+  throw new Error("API Timeout after retries");
 }
 
-// --- OPTIMIZED LOOKUP: FETCH ALL & MAP ---
-// This is the only way to search by Custom Attributes efficiently.
-// It fetches all users (13k ≈ 130 pages) and builds a map.
+// --- LOGIC HELPERS ---
+
+// Bulk Fetch User Map (The "Phonebook" Strategy)
 async function getAllUsersMap() {
-  const userMap = new Map(); // Key: StoreID, Value: UserObject
+  const userMap = new Map(); 
   let offset = 0;
   const limit = 100;
   
@@ -67,10 +73,10 @@ async function getAllUsersMap() {
       if (!res.data || res.data.length === 0) break;
 
       for (const user of res.data) {
-        // key is the Value inside the Custom Attribute (e.g. "51362")
-        // If HIDDEN_ATTRIBUTE_KEY is not set, it might fall back to something else, so ensure .env is correct.
+        // We look for the Store ID in the custom profile field
         const storeId = user.profile?.[HIDDEN_ATTRIBUTE_KEY];
         if (storeId) {
+          // Map Store ID -> User Object
           userMap.set(String(storeId), {
             id: user.id,
             csvId: String(storeId),
@@ -81,8 +87,6 @@ async function getAllUsersMap() {
 
       if (res.data.length < limit) break;
       offset += limit;
-      
-      // Small safety delay to be nice to the API
       if (offset % 1000 === 0) await delay(200); 
 
     } catch (e) {
@@ -90,12 +94,10 @@ async function getAllUsersMap() {
       break;
     }
   }
-  
-  console.log(`Directory loaded. Found ${userMap.size} users with store IDs.`);
   return userMap;
 }
 
-// --- HELPERS ---
+// Parse Task CSV (Buffer -> Array)
 function parseTaskCSV(buffer) {
   try {
     const text = buffer.toString("utf8");
@@ -113,19 +115,23 @@ function parseTaskCSV(buffer) {
   } catch (e) { return []; }
 }
 
+// Find Store Projects (e.g., "Store 1001")
 async function discoverProjectsByStoreIds(storeIds) {
   const projectMap = {};
   let offset = 0; const limit = 100;
   while(true) {
     const res = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
     if(!res.data || res.data.length === 0) break;
+    
     res.data.forEach(inst => {
       const title = inst.config?.localization?.en_US?.title || "";
+      // Regex to find "Store {ID}" projects
       const match = title.match(/^Store\s+(\w+)$/i);
       if(match && storeIds.includes(match[1])) {
         projectMap[match[1]] = inst.id;
       }
     });
+    
     if(res.data.length < limit) break;
     offset += limit;
   }
@@ -134,7 +140,7 @@ async function discoverProjectsByStoreIds(storeIds) {
 
 // --- ROUTES ---
 
-// 1. VERIFY USERS (Now uses the Bulk Map strategy)
+// 1. VERIFY USERS
 app.post("/api/verify-users", async (req, res) => {
   try {
     const { storeIds } = req.body;
@@ -146,14 +152,11 @@ app.post("/api/verify-users", async (req, res) => {
     const foundUsers = [];
     const notFoundIds = [];
 
-    // 2. Look up every ID in the phonebook (Instant)
+    // 2. Instant Lookup
     for (const id of storeIds) {
       const user = userMap.get(String(id));
-      if (user) {
-        foundUsers.push(user);
-      } else {
-        notFoundIds.push(id);
-      }
+      if (user) foundUsers.push(user);
+      else notFoundIds.push(id);
     }
 
     res.json({ foundUsers, notFoundIds });
@@ -163,25 +166,24 @@ app.post("/api/verify-users", async (req, res) => {
   }
 });
 
-// 2. CREATE POST
+// 2. CREATE ADHOC POST & TASKS
+// Use upload.single('taskCsv') because the store list is now in req.body
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
     let { verifiedUsers, title, department } = req.body;
     
-    // Parse verifiedUsers from string if needed
+    // Parse the JSON string sent by frontend
     if (typeof verifiedUsers === 'string') {
       try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
 
-    // Fallback: If verifying stores failed or wasn't done, we need to map them now.
-    // This handles the "No valid users found" error if the frontend didn't pass the object correctly.
+    // Fallback: If verification wasn't passed, try to resolve raw IDs (Safety net)
     if (!verifiedUsers || verifiedUsers.length === 0) {
-       // If client sent raw storeIds instead of verified objects, try to resolve them
        let { storeIds } = req.body;
        if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
        
        if (storeIds && storeIds.length > 0) {
-         console.log("Resolving raw store IDs for creation...");
+         console.log("Fallback: Resolving raw store IDs...");
          const userMap = await getAllUsersMap();
          verifiedUsers = [];
          for(const id of storeIds) {
@@ -192,31 +194,31 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     }
 
     if (!verifiedUsers || verifiedUsers.length === 0) {
-      return res.status(400).json({ error: "No verified users found. Please verify stores first." });
+      return res.status(400).json({ error: "No verified users provided." });
     }
 
-    // 1. Extract IDs
-    const userIds = verifiedUsers.map(u => u.id); // Internal IDs
-    const storeIds = verifiedUsers.map(u => u.csvId); // Store IDs
+    // Extract necessary ID lists
+    const userIds = verifiedUsers.map(u => u.id); // Internal IDs for Channel Access
+    const storeIds = verifiedUsers.map(u => u.csvId); // Store IDs for Task Lists
 
-    // 2. Metadata (Using Hyphens - Safe)
+    // Generate Metadata (Using Underscores)
     const now = Date.now();
     const safeDept = (department || 'General').replace(/[^a-zA-Z0-9]/g, ''); 
-    const metaExternalID = `adhoc-v2-${now}-${userIds.length}-${safeDept}`;
+    const metaExternalID = `adhoc_v3_${now}_${userIds.length}_${safeDept}`;
 
-    // 3. Create Channel
+    // A. Create Channel
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
       config: {
         localization: { en_US: { title: title }, de_DE: { title: title } }
       },
-      accessorIDs: userIds
+      accessorIDs: userIds // <--- CONFIRMED: This sets visibility to your target stores
     });
     
     const channelId = channelRes.id;
 
-    // 4. Create Post
+    // B. Create Post
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
@@ -227,22 +229,25 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       }
     });
 
-    // 5. Handle Tasks
+    // C. Handle Tasks (Using storeIds from input)
     let taskCount = 0;
     if (req.file) {
       const tasks = parseTaskCSV(req.file.buffer);
       if (tasks.length > 0) {
+        // 1. Find matching Store Projects
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
         
-        // Chunk requests
+        // 2. Chunk requests to create tasks safely
         const chunkedInsts = [];
         for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
 
         for (const chunk of chunkedInsts) {
           await Promise.all(chunk.map(async (instId) => {
             try {
+              // Create List
               const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
+              // Create Tasks
               for (const t of tasks) {
                 await sb("POST", `/tasks/${instId}/task`, {
                   taskListId: listRes.id,
@@ -253,7 +258,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
                   assigneeIds: [] 
                 });
               }
-            } catch(e) { console.error(`Task error ${instId}`, e.message); }
+            } catch(e) { console.error(`Task error for project ${instId}`, e.message); }
           }));
         }
         taskCount = tasks.length * installationIds.length;
@@ -268,7 +273,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   }
 });
 
-// 3. GET ITEMS
+// 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
   try {
     const items = [];
@@ -285,17 +290,31 @@ app.get("/api/items", async (req, res) => {
         const title = inst.config?.localization?.en_US?.title || "Untitled";
         const extID = inst.externalID || "";
 
-        if (extID.startsWith('adhoc-v2-')) {
-          const parts = extID.split('-');
+        // STRATEGY A: New V3 (Underscore)
+        if (extID.startsWith('adhoc_v3_')) {
+          const parts = extID.split('_');
           item = {
             channelId: inst.id,
             title: title,
-            department: parts[3] || "General",
+            department: parts[4] || parts[3] || "General",
             userCount: parts[2] || "0",
             createdAt: new Date(parseInt(parts[1])).toISOString(),
             status: "Draft"
           };
-        } 
+        }
+        // STRATEGY B: Legacy Support
+        else if (extID.startsWith('adhoc-v2-') || extID.startsWith('adhoc_v2|')) {
+           const separator = extID.includes('-') ? '-' : '|';
+           const parts = extID.split(separator);
+           item = {
+             channelId: inst.id,
+             title: title,
+             department: parts[3],
+             userCount: parts[2],
+             createdAt: new Date(parseInt(parts[1])).toISOString(),
+             status: "Draft"
+           };
+        }
         else if (title.startsWith('[external]')) {
           const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
           if (match) {
@@ -334,6 +353,7 @@ app.get("/api/items", async (req, res) => {
   }
 });
 
+// 4. DELETE
 app.delete("/api/delete/:id", async (req, res) => {
   try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
   catch (err) { res.status(500).json({ error: err.message }); }
