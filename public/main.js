@@ -6,7 +6,7 @@ const status = document.getElementById("status");
 const taskCsvInput = document.getElementById("taskCsv");
 const taskCsvFileName = document.getElementById("taskCsvFileName");
 
-// Update file name display for Task CSV
+// Update file name display
 if (taskCsvInput) {
   taskCsvInput.addEventListener("change", () => {
     taskCsvFileName.textContent = taskCsvInput.files.length > 0 ? taskCsvInput.files[0].name : "No file selected";
@@ -45,10 +45,6 @@ async function verifyStores() {
   const searchIds = rawInput.split(/[\s,]+/).filter(Boolean);
   const uniqueIds = [...new Set(searchIds)];
 
-  if (uniqueIds.length > 5000) {
-     if(!confirm(`You are verifying ${uniqueIds.length} stores. This might take a moment. Continue?`)) return;
-  }
-
   btn.textContent = "Verifying...";
   btn.disabled = true;
 
@@ -69,15 +65,15 @@ async function verifyStores() {
     
     // ERROR CODE UPDATE: Explicitly list failed IDs
     if (notFoundCount > 0) {
-        const errorList = data.notFoundIds.slice(0, 10).join(', ') + (data.notFoundIds.length > 10 ? '...' : '');
+        const errorList = data.notFoundIds.join(', ');
         if (validStores.length === 0) {
              // Case: ALL failed
-             status.innerHTML = `✗ <strong>No valid stores found.</strong><br>The following IDs were not found: ${errorList}`;
+             status.textContent = `✗ No valid stores found. The following IDs were not found: ${errorList}`;
              status.className = "status-error";
         } else {
              // Case: SOME failed
-             status.innerHTML = `⚠️ <strong>Warning:</strong> ${notFoundCount} IDs were not found: ${errorList}`;
-             status.className = "status-error"; 
+             status.textContent = `⚠️ Warning: ${notFoundCount} IDs were not found: ${errorList}`;
+             status.className = "status-error"; // Yellow/Red warning style
         }
     } else if (validStores.length > 0) {
         // Case: ALL success
@@ -90,7 +86,7 @@ async function verifyStores() {
       resultsContainer.style.display = 'block';
       currentPage = 1;
       renderStoreTable();
-      countMsg.textContent = `✓ Found ${validStores.length} valid stores.`;
+      countMsg.textContent = `✓ Found ${validStores.length} valid stores ready for targeting.`;
     } 
 
   } catch (err) {
@@ -152,10 +148,9 @@ form.addEventListener("submit", async (e) => {
 
   try {
     const formData = new FormData();
+    const storeIds = validStores.map(s => s.csvId);
     
-    // === CRITICAL: Send 'verifiedUsers' so backend skips lookup ===
-    formData.append("verifiedUsers", JSON.stringify(validStores));
-    
+    formData.append("storeIds", JSON.stringify(storeIds));
     formData.append("title", title);
     formData.append("department", department);
     formData.append("notify", notify);
@@ -250,43 +245,24 @@ function filterAndRenderItems() {
 
 function attachDeleteListeners() {
   document.querySelectorAll(".btn-delete-post").forEach(btn => {
-    // Clone to remove old listeners
-    const newBtn = btn.cloneNode(true);
-    btn.parentNode.replaceChild(newBtn, btn);
-
-    newBtn.addEventListener("click", async (e) => {
-      e.preventDefault();
+    btn.addEventListener("click", async (e) => {
       if(!confirm("Delete this channel and its posts?")) return;
-      
-      try {
-        await fetch(`/api/delete/${e.target.dataset.id}`, { method: "DELETE" });
-        location.reload();
-      } catch(err) {
-        alert("Delete failed: " + err.message);
-      }
+      await fetch(`/api/delete/${e.target.dataset.id}`, { method: "DELETE" });
+      location.reload();
     });
   });
 }
 
 // Event Listeners for Filters
-if (filterDepartment) filterDepartment.addEventListener("change", filterAndRenderItems);
-if (filterTitle) filterTitle.addEventListener("input", filterAndRenderItems);
-if (filterStatus) filterStatus.addEventListener("change", filterAndRenderItems);
-
-if (resetFilters) {
-  resetFilters.addEventListener("click", () => {
-    filterDepartment.value = ""; 
-    filterTitle.value = ""; 
-    filterStatus.value = "draft";
-    filterAndRenderItems();
-  });
-}
-
-if (toggleFiltersBtn) {
-  toggleFiltersBtn.addEventListener("click", (e) => {
-    e.preventDefault();
-    filtersContainer.style.display = filtersContainer.style.display === "none" ? "grid" : "none";
-  });
-}
+filterDepartment.addEventListener("change", filterAndRenderItems);
+filterTitle.addEventListener("input", filterAndRenderItems);
+filterStatus.addEventListener("change", filterAndRenderItems);
+resetFilters.addEventListener("click", () => {
+  filterDepartment.value = ""; filterTitle.value = ""; filterStatus.value = "draft";
+  filterAndRenderItems();
+});
+toggleFiltersBtn.addEventListener("click", () => {
+  filtersContainer.style.display = filtersContainer.style.display === "none" ? "grid" : "none";
+});
 
 document.addEventListener("DOMContentLoaded", loadPersistedItems);
