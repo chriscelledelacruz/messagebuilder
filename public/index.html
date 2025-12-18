@@ -92,6 +92,7 @@
         <option value="published">Published</option>
       </select>
     </div>
+    
     <input type="date" id="filterDateFrom" style="display:none">
     <input type="date" id="filterDateTo" style="display:none">
     <select id="sortOrder" style="display:none"><option value="desc">Desc</option></select>
@@ -101,17 +102,16 @@
 
   <div id="list"></div>
 
-
   <div id="verificationModal" class="modal" style="display: none;">
     <div class="modal-content">
-      <h2>Verify Stores</h2>
+      <h2 style="margin-top:0;">Verify Stores</h2>
       <p>Review the stores found in Staffbase before creating the post:</p>
       
       <div id="verificationContent"></div>
       
       <div class="modal-buttons">
-        <button id="cancelVerification" class="btn-cancel" style="background:#666; color:white; border:none; padding:10px 20px; border-radius:4px;">Cancel</button>
-        <button id="confirmUsers" class="btn-confirm" style="background:var(--se-green); color:white; border:none; padding:10px 20px; border-radius:4px;">Proceed</button>
+        <button id="cancelVerification" class="btn-cancel">Cancel</button>
+        <button id="confirmUsers" class="btn-confirm">Proceed</button>
       </div>
     </div>
   </div>
