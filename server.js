@@ -316,7 +316,7 @@ app.get("/api/items", async (req, res) => {
             channelId: inst.id,
             title: title,
             department: "General", 
-            userCount: 0, // Will update from post content
+            userCount: 0, // Fallback, will update from post content
             createdAt: inst.created || new Date().toISOString(),
             status: "Draft"
           };
@@ -354,13 +354,10 @@ app.get("/api/items", async (req, res) => {
               const content = p.contents?.en_US?.content || "";
 
               // --- FIX: Extract metadata directly from the HTML content ---
-              // This is necessary because accessorIDs are often hidden in lists,
-              // and the teaser field isn't always reliable.
-              
               // 1. Extract Department from "Category:" HTML
-              constFZ = content.match(/Category:<\/strong>\s*(.*?)<\/p>/);
-              if (constFZ && constFZ[1]) {
-                 item.department = constFZ[1];
+              const deptMatch = content.match(/Category:<\/strong>\s*(.*?)<\/p>/);
+              if (deptMatch && deptMatch[1]) {
+                 item.department = deptMatch[1];
               } else if (p.contents?.en_US?.teaser) {
                  item.department = p.contents.en_US.teaser; 
               }
