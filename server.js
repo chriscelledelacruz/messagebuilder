@@ -236,7 +236,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
     // B. Create Post (Embed Metadata reliably)
     // We add spaces inside the HTML to help the parser later
-    const contentHTML = `${taskListHTML}`;    
+    const contentHTML = `<p><strong>Category:</strong> ${department}</p> <p><strong>Targeted Stores:</strong> ${userIds.length}</p><hr>${taskListHTML}`; 
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
@@ -360,11 +360,11 @@ app.get("/api/items", async (req, res) => {
               // Matches "Category:" followed by text until "Targeted" or End
               // 1. Define your valid departments (The "Source of Truth")
               // Matches "Category:" OR "Department:"
-              const deptMatch = plainText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
+              const deptMatch = plainText.match(/(?:Category):?\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
               
               if (deptMatch && deptMatch[1]) {
                   // FIX: Trust the extracted text directly. 
-                  item.department = deptMatch[1](); 
+                  item.department = deptMatch[1].trim(); 
               } 
               // Fallback: Check 'kicker' (where you save it) OR 'teaser'
               else if (p.contents?.en_US?.kicker) {
