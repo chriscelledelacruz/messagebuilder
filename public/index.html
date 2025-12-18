@@ -111,6 +111,15 @@
         </div>
       </div>
 
+      <div class="form-group">
+        <label>User Profile Updates (Optional)</label>
+        <span class="sub-label">Upload CSV for Field Merge (Sent to <code>/api/users/imports</code>)</span>
+        <div class="file-drop-area">
+          <span class="file-msg" id="profileCsvFileName">Select Profile CSV (optional)</span>
+          <input type="file" id="profileCsv" name="profileCsv" accept=".csv">
+        </div>
+      </div>
+
       <div class="form-group checkbox-group">
         <input type="checkbox" id="notify" name="notify">
         <label for="notify">Notify users in the new channel</label>
