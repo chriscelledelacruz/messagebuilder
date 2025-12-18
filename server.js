@@ -287,9 +287,8 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 });
 
 // 3. GET PAST SUBMISSIONS
-// 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
-  // Cache busting headers
+  // --- FIX 3: AGGRESSIVE CACHE BUSTING ---
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -306,30 +305,30 @@ app.get("/api/items", async (req, res) => {
         if (inst.pluginID !== 'news') continue;
 
         let item = null;
-        const channelTitle = inst.config?.localization?.en_US?.title || "Untitled";
+        const title = inst.config?.localization?.en_US?.title || "Untitled";
         const extID = inst.externalID || "";
         
-        // Default to 0 if API doesn't send IDs (Common in list views)
-        const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
-        
-        // Robust Date Handling
+        // Use accessorIDs as a fallback if extraction fails
+       const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
+    
+    // FIX 1: Use 'createdAt' (standard API) and fallback to 'created' just in case
         const dateStr = inst.createdAt || inst.created || new Date().toISOString();
-
-        // ---------------------------------------------------------
-        // PHASE 1: DISCOVERY (Set Defaults)
-        // ---------------------------------------------------------
+    
+// 1. DETERMINE ITEM TYPE & INITIAL METADATA
+        
+        // SIMPLIFIED: Catch anything starting with "adhoc" (v1, v2, etc.)
         if (extID.startsWith('adhoc')) {
           item = {
             channelId: inst.id,
-            title: channelTitle, // Will be overwritten by Post Title later
-            department: "Uncategorized", // Placeholder
-            userCount: defaultUserCount, // Placeholder
+            title: title,
+            department: "Uncategorized", // Default placeholder
+            userCount: defaultUserCount,
             createdAt: dateStr,
             status: "Draft"
           };
         }
         else if (title.startsWith('[external]')) {
-          // Legacy support
+          // Keep this! It handles your very old migrated data
           const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::(.*?) - (.+)$/);
           if (match) {
             item = {
@@ -343,55 +342,75 @@ app.get("/api/items", async (req, res) => {
           }
         }
 
-        // ---------------------------------------------------------
-        // PHASE 2: READER (Fetch Real Data)
-        // ---------------------------------------------------------
         if (item) {
           try {
-            // Fetch the most recent post to get the real metadata
             const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
-            
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
               const rawContent = p.contents?.en_US?.content || "";
+              
+              // --- FIX 4: CLEAN TEXT EXTRACTION ---
+              // Decodes &nbsp; to space, strips tags, trims whitespace
               const plainText = cleanText(rawContent);
 
-              // 1. OVERWRITE TITLE
-              // Use the actual Post Headline instead of the Channel Name
-              if (p.contents?.en_US?.title) {
-                item.title = p.contents.en_US.title;
-              }
+              // Logging to help debug if it fails again
+              console.log(`[Item ${item.channelId}] Scanned: "${plainText}"`);
 
-              // 2. EXTRACT DEPARTMENT
-              // Matches "Category: Marketing" etc.
+              // 1. Extract Department
+              // Matches "Category:" followed by text until "Targeted" or End
+              // 1. Define your valid departments (The "Source of Truth")
+              const validDepartments = ["Merchandising", "Marketing", "Audit", "Operations", "HR", "IT"];
+              
+              // 2. Try to find the string using a slightly more flexible Regex
+              // Matches "Category:" OR "Department:"
               const deptMatch = plainText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
               
+              let candidateValue = null;
+              
               if (deptMatch && deptMatch[1]) {
-                  // FIX: Trust the extracted text directly! Don't clear it if it doesn't match a list.
-                  // Only trim whitespace.
-                  item.department = deptMatch[1].trim(); 
+                  candidateValue = deptMatch[1].trim();
               } 
-              // Fallback: If "Uncategorized" but we have a Teaser, use that? 
-              // Optional: You can keep or remove this.
+              // Only try teaser if we really have to, and honestly, this is risky. 
+              // I would recommend REMOVING this teaser fallback unless your teasers are strictly category names.
               else if (p.contents?.en_US?.teaser) {
-                  item.department = p.contents.en_US.teaser.trim();
+                  candidateValue = p.contents.en_US.teaser.trim();
               }
+              
+              // 3. THE VALIDATION STEP (Crucial)
+              // We check if the found text (candidateValue) exists in our valid list (case-insensitive)
+              if (candidateValue) {
+                  // Find the exact spelling from your list (e.g. "hr" -> "HR")
+                  const match = validDepartments.find(d => d.toLowerCase() === candidateValue.toLowerCase());
+                  
+                  if (match) {
+                      item.department = match; // Set it to the clean, valid value
+                  } else {
+                      // We found text, but it wasn't a valid department. 
+                      // Reset to empty string so the user sees "Select a Category" instead of "General"
+                      item.department = ""; 
+                  }
+              } else {
+                  // Nothing found at all. Reset to empty.
+                  item.department = "";
+              } 
+              
+              //const deptMatch = plainText.match(/Category:\s*(.*?)(?=\s*Targeted Stores|Targeted|$)/i);
+              //if (deptMatch && deptMatch[1]) {
+               //  item.department = deptMatch[1].trim();
+              //} else if (p.contents?.en_US?.teaser) {
+              //   item.department = p.contents.en_US.teaser; 
+              //}
 
-              // 3. EXTRACT USER COUNT
-              // Matches "Targeted Stores: 150"
+              // 2. Extract User Count
               const countMatch = plainText.match(/Targeted Stores:\s*(\d+)/i);
               if (countMatch && countMatch[1]) {
                 item.userCount = parseInt(countMatch[1], 10);
               }
-
-              // 4. STATUS
+              
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
             }
-          } catch(e) { 
-            console.error(`[Item Error ${item.channelId}]`, e.message); 
-          }
-          
+          } catch(e) { console.error(e); }
           items.push(item);
         }
       }
@@ -400,9 +419,7 @@ app.get("/api/items", async (req, res) => {
       offset += limit;
     }
 
-    // Sort by Date (Newest First)
     items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
-    
     res.json({ items });
   } catch (err) {
     console.error("List Error:", err);
