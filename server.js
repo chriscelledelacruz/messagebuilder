@@ -230,6 +230,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       contents: { 
         en_US: { 
           title: title, 
+          // Storing metadata in content for reliable retrieval later
           content: `<p><strong>Category:</strong> ${department}</p><p>Targeted Stores: ${userIds.length}</p>`, 
           teaser: department 
         } 
@@ -315,7 +316,7 @@ app.get("/api/items", async (req, res) => {
             channelId: inst.id,
             title: title,
             department: "General", 
-            userCount: inst.accessorIDs ? inst.accessorIDs.length : 0,
+            userCount: inst.accessorIDs ? inst.accessorIDs.length : 0, // Fallback, usually 0 in list view
             createdAt: inst.created || new Date().toISOString(),
             status: "Draft"
           };
@@ -350,10 +351,23 @@ app.get("/api/items", async (req, res) => {
             const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
-              // FETCH DEPARTMENT from the Teaser if it's our new format
-              if (item.department === "General" && p.contents?.en_US?.teaser) {
-                item.department = p.contents.en_US.teaser; 
+              const content = p.contents?.en_US?.content || "";
+
+              // --- FIX: Extract metadata directly from the HTML content ---
+              // 1. Extract Department from "Category:" HTML
+              const deptMatch = content.match(/<strong>Category:<\/strong>\s*(.*?)<\/p>/);
+              if (deptMatch && deptMatch[1]) {
+                 item.department = deptMatch[1];
+              } else if (p.contents?.en_US?.teaser) {
+                 item.department = p.contents.en_US.teaser; 
               }
+
+              // 2. Extract User Count from "Targeted Stores:" HTML
+              const countMatch = content.match(/Targeted Stores:\s*(\d+)/);
+              if (countMatch && countMatch[1]) {
+                item.userCount = parseInt(countMatch[1], 10);
+              }
+              // -------------------------------------------------------------
               
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
