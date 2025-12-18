@@ -5,19 +5,22 @@ require("dotenv").config();
 
 const app = express();
 
-// Middleware
-app.use(express.json({ limit: '10mb' })); // Increased limit for large store lists
+// Middleware to parse JSON bodies
+app.use(express.json());
+
+// Multer for Task CSV (storeIds now come as text/JSON in body)
 const upload = multer({ storage: multer.memoryStorage() });
 
 const STAFFBASE_BASE_URL = process.env.STAFFBASE_BASE_URL;
 const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
 const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
-// NOTE: For scalable search, we assume Store ID matches the User 'externalID'.
-// If you use a custom profile field, this will need a different search strategy.
+const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
+// The ID of the Tasks Plugin Installation where Task Lists are defined generally
+// If you create lists inside specific Store Projects, this might be dynamic. 
+// For this POC, we use a central ID or discover dynamic ones.
+const TASKS_PLUGIN_ID = "tasks"; 
 
-// --- API HELPER (With Rate Limit Handling) ---
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
+// --- API HELPER ---
 async function sb(method, path, body) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const options = {
@@ -29,110 +32,81 @@ async function sb(method, path, body) {
   };
   if (body) options.body = JSON.stringify(body);
 
-  // Simple retry logic for rate limits
-  let retries = 3;
-  while (retries > 0) {
-    const res = await fetch(url, options);
-    
-    if (res.status === 429) {
-      // Hit rate limit, wait 1s and retry
-      console.warn(`[API 429] Rate limit hit on ${path}, retrying...`);
-      await delay(1000);
-      retries--;
-      continue;
-    }
-
-    if (!res.ok) {
-      const txt = await res.text();
-      console.error(`[API Error] ${method} ${path}: ${res.status} - ${txt}`); 
-      throw new Error(`API ${res.status}: ${txt}`);
-    }
-    
-    if (res.status === 204) return {};
-    return res.json();
+  const res = await fetch(url, options);
+  if (!res.ok) {
+    const txt = await res.text();
+    console.error(`[API Error] ${method} ${path}: ${res.status} - ${txt}`); 
+    throw new Error(`API ${res.status}: ${txt}`);
   }
-  throw new Error("API Timeout after retries");
+  if (res.status === 204) return {};
+  return res.json();
 }
 
-// --- OPTIMIZED VERIFICATION (Batching) ---
-// Processes IDs in chunks to respect API limits but go fast
-async function batchVerifyUsers(storeIds) {
-  const foundUsers = [];
-  const notFoundIds = [];
-  
-  // Staffbase allows ~10 req/sec usually. We'll be safe with concurrency 5.
-  const CONCURRENCY = 5; 
-  
-  // Helper to process a single ID
-  const checkId = async (id) => {
-    try {
-      // SCALABILITY FIX: Direct lookup instead of scanning all pages
-      // Endpoint: GET /users?externalID={id}
-      const res = await sb("GET", `/users?externalID=${encodeURIComponent(id)}`);
-      
-      if (res.data && res.data.length > 0) {
-        // Strict match check to ensure API didn't return partial match
-        const user = res.data.find(u => u.externalID === id);
-        if (user) {
-          foundUsers.push({
-            id: user.id, // Internal ID needed for channel creation
-            csvId: id,
-            name: `${user.firstName || ''} ${user.lastName || ''}`.trim()
-          });
-        } else {
-          notFoundIds.push(id);
-        }
-      } else {
-        notFoundIds.push(id);
-      }
-    } catch (err) {
-      console.error(`Failed to verify ${id}: ${err.message}`);
-      notFoundIds.push(id);
-    }
-  };
+// --- LOGIC HELPERS ---
 
-  // Run in batches
-  for (let i = 0; i < storeIds.length; i += CONCURRENCY) {
-    const chunk = storeIds.slice(i, i + CONCURRENCY);
-    await Promise.all(chunk.map(id => checkId(id)));
+// 1. Find User
+async function findUserByHiddenId(csvId) {
+  let offset = 0;
+  const limit = 100;
+  while (true) {
+    const result = await sb("GET", `/users?limit=${limit}&offset=${offset}`);
+    if (!result.data || result.data.length === 0) break;
+    
+    const found = result.data.find(u => u.profile?.[HIDDEN_ATTRIBUTE_KEY] === csvId);
+    if (found) return found;
+    
+    if (result.data.length < limit) break;
+    offset += limit;
   }
-
-  return { foundUsers, notFoundIds };
+  return null;
 }
 
-// --- HELPERS ---
+// 2. Parse Task CSV (Semicolon separated: Title;Desc;Date)
 function parseTaskCSV(buffer) {
   try {
     const text = buffer.toString("utf8");
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     const tasks = [];
+    
     lines.forEach(line => {
       const [title, desc, date] = line.split(';').map(s => s ? s.trim() : '');
       if (title) {
+        // Simple date formatter (assuming input is YYYY-MM-DD or similar)
         let dueDate = null;
         if(date) dueDate = new Date(date).toISOString();
+        
         tasks.push({ title, description: desc || "", dueDate });
       }
     });
     return tasks;
-  } catch (e) { return []; }
+  } catch (e) {
+    console.error("CSV Parse Error", e);
+    return [];
+  }
 }
 
+// 3. Discover "Store Projects" (Installations named "Store {ID}")
 async function discoverProjectsByStoreIds(storeIds) {
-  const projectMap = {};
+  const projectMap = {}; // storeId -> installationId
   let offset = 0; 
   const limit = 100;
-  // This loop is still needed for project discovery, but we only do it once per Create action
+
   while(true) {
     const res = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
     if(!res.data || res.data.length === 0) break;
+
     res.data.forEach(inst => {
       const title = inst.config?.localization?.en_US?.title || "";
-      const match = title.match(/^Store\s+(\w+)$/i); // Matches "Store 1001"
-      if(match && storeIds.includes(match[1])) {
-        projectMap[match[1]] = inst.id;
+      // Check if title is like "Store 12345"
+      const match = title.match(/^Store\s+(\w+)$/i);
+      if(match) {
+        const sId = match[1];
+        if(storeIds.includes(sId)) {
+          projectMap[sId] = inst.id;
+        }
       }
     });
+
     if(res.data.length < limit) break;
     offset += limit;
   }
@@ -141,95 +115,121 @@ async function discoverProjectsByStoreIds(storeIds) {
 
 // --- ROUTES ---
 
+// 1. VERIFY USERS
 app.post("/api/verify-users", async (req, res) => {
   try {
     const { storeIds } = req.body;
     if (!storeIds || !Array.isArray(storeIds)) return res.status(400).json({ error: "Invalid storeIds" });
 
-    // Use the optimized batch processor
-    const result = await batchVerifyUsers(storeIds);
-    res.json(result);
+    const foundUsers = [];
+    const notFoundIds = [];
+
+    // Parallel processing for speed in POC (be careful with rate limits in Prod)
+    // For safer execution, use a for...of loop
+    for (const id of storeIds) {
+      const user = await findUserByHiddenId(id);
+      if (user) {
+        foundUsers.push({
+          id: user.id,
+          csvId: id,
+          name: `${user.firstName || ''} ${user.lastName || ''}`.trim()
+        });
+      } else {
+        notFoundIds.push(id);
+      }
+    }
+
+    res.json({ foundUsers, notFoundIds });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// 2. CREATE ADHOC POST (The Main Chain)
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
     let { storeIds, title, department } = req.body;
+    
+    // Parse storeIds if stringified
     if (typeof storeIds === 'string') {
       try { storeIds = JSON.parse(storeIds); } catch(e) {}
     }
 
     if (!storeIds || storeIds.length === 0) return res.status(400).json({ error: "No stores provided" });
 
-    // 1. Resolve User IDs (Batch optimized)
-    const verification = await batchVerifyUsers(storeIds);
-    const userIds = verification.foundUsers.map(u => u.id);
-    
-    if (userIds.length === 0) {
-      return res.status(404).json({ error: `No valid users found. Failed: ${verification.notFoundIds.join(', ')}` });
+    // A. Resolve Users
+    const userIds = [];
+    for (const id of storeIds) {
+      const user = await findUserByHiddenId(id);
+      if (user) userIds.push(user.id);
     }
+    if (userIds.length === 0) return res.status(404).json({ error: "No valid users found for these stores." });
 
-    // 2. Generate Metadata (FIXED 400 ERROR)
-    // Changed separator '|' -> '_' to satisfy API requirements
+    // B. Generate Metadata
     const now = Date.now();
-    const safeDept = department.replace(/[^a-zA-Z0-9]/g, ''); // Remove special chars
-    const metaExternalID = `adhoc_v2_${now}_${userIds.length}_${safeDept}`;
+    // Format: adhoc_v2|timestamp|userCount|department
+    // We store this in externalID so it's hidden from the UI but searchable by us
+    const metaExternalID = `adhoc_v2|${now}|${userIds.length}|${department.replace(/\|/g, '-')}`;
 
-    // 3. Create Channel
+    // C. Create Channel (CLEAN TITLE)
+    // We put the "ugly" metadata in externalID, and the clean title in localization
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
       config: {
-        localization: { en_US: { title: title }, de_DE: { title: title } }
+        localization: { 
+          en_US: { title: title }, 
+          de_DE: { title: title } 
+        }
       },
       accessorIDs: userIds
     });
+    
     const channelId = channelRes.id;
 
-    // 4. Create Post
+    // D. Create Post
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
           title: title, 
-          content: `<p><strong>Department:</strong> ${department}</p><p>Targeted Stores: ${userIds.length}</p>`, 
+          content: `<p><strong>Department:</strong> ${department}</p><p>Please review the attached tasks.</p>`, 
           teaser: department 
         } 
       }
     });
 
-    // 5. Handle Tasks
+    // E. Handle Tasks (If CSV present)
     let taskCount = 0;
     if (req.file) {
       const tasks = parseTaskCSV(req.file.buffer);
       if (tasks.length > 0) {
+        // 1. Find target projects (Store Installations)
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
         
-        // Create tasks in verified store projects
-        // We limit concurrency here too to be safe
-        const chunkedInsts = [];
-        for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
-
-        for (const chunk of chunkedInsts) {
-          await Promise.all(chunk.map(async (instId) => {
-            try {
-              const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
-              for (const t of tasks) {
-                await sb("POST", `/tasks/${instId}/task`, {
-                  taskListId: listRes.id,
-                  title: t.title,
-                  description: t.description,
-                  dueDate: t.dueDate,
-                  status: "OPEN",
-                  assigneeIds: [] 
-                });
-              }
-            } catch(e) { console.error(`Task error ${instId}`, e.message); }
-          }));
+        // 2. Loop through store projects and create list + tasks
+        for (const instId of installationIds) {
+          try {
+            // Create List
+            const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
+            const listId = listRes.id;
+            
+            // Create Tasks in List
+            for (const t of tasks) {
+              await sb("POST", `/tasks/${instId}/task`, {
+                taskListId: listId,
+                title: t.title,
+                description: t.description,
+                dueDate: t.dueDate,
+                status: "OPEN",
+                assigneeIds: [] 
+              });
+            }
+            taskCount += tasks.length;
+          } catch (e) {
+            console.error(`Failed tasks for inst ${instId}`, e.message);
+          }
         }
-        taskCount = tasks.length * installationIds.length;
       }
     }
 
@@ -241,62 +241,78 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   }
 });
 
-// GET ITEMS (Updated regex to handle _ separator)
+// 3. GET ITEMS (Past Submissions)
 app.get("/api/items", async (req, res) => {
   try {
     const items = [];
-    let offset = 0; const limit = 100;
+    let offset = 0;
+    const limit = 100;
+
+    // 1. Fetch all News Installations
     while(true) {
       const result = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
       if (!result.data || result.data.length === 0) break;
 
-      for (const inst of result.data) {
-        if (inst.pluginID !== 'news') continue;
-        let item = null;
-        const title = inst.config?.localization?.en_US?.title || "Untitled";
-        const extID = inst.externalID || "";
+      // 2. Filter for our "Adhoc" channels using the externalID prefix
+      const adhocChannels = result.data.filter(i => 
+        i.pluginID === 'news' && i.externalID && i.externalID.startsWith('adhoc_v2|')
+      );
 
-        // V2 (Underscore)
-        if (extID.startsWith('adhoc_v2_')) {
-          const parts = extID.split('_'); // Split by _ now
-          item = {
-            channelId: inst.id,
-            title: title,
-            department: parts[4] || parts[3] || "General", // Safe fallback
-            userCount: parts[2] || "0",
-            createdAt: new Date(parseInt(parts[1])).toISOString(),
-            status: "Draft"
-          };
-        } 
-        // V1 Legacy Support (Pipe or Title)
-        else if (extID.startsWith('adhoc_v2|')) {
-           const parts = extID.split('|');
-           item = {
-             channelId: inst.id,
-             title: title,
-             department: parts[3],
-             userCount: parts[2],
-             createdAt: new Date(parseInt(parts[1])).toISOString(),
-             status: "Draft"
-           };
-        }
+      // 3. Hydrate with Status
+      for (const channel of adhocChannels) {
+        // Parse metadata: adhoc_v2|timestamp|userCount|department
+        const parts = channel.externalID.split('|');
+        const timestamp = parseInt(parts[1]);
+        const userCount = parts[2];
+        const department = parts[3];
+        const title = channel.config?.localization?.en_US?.title || "Untitled";
 
-        if (item) {
-          // Fetch status... (Simplified for brevity, logic remains same)
-          items.push(item);
-        }
+        // Get Posts to determine status
+        let status = "Draft";
+        let postId = null;
+        try {
+          const posts = await sb("GET", `/channels/${channel.id}/posts?limit=1`);
+          if (posts.data && posts.data.length > 0) {
+            const p = posts.data[0];
+            postId = p.id;
+            if (p.published) status = "Published";
+            else if (p.planned) status = "Scheduled";
+          }
+        } catch(e) {}
+
+        items.push({
+          channelId: channel.id,
+          title,
+          department,
+          userCount,
+          createdAt: new Date(timestamp).toISOString(),
+          status,
+          postId
+        });
       }
+
       if (result.data.length < limit) break;
       offset += limit;
     }
+
+    // Sort by date desc
     items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+
     res.json({ items });
-  } catch (err) { res.json({ items: [] }); }
+  } catch (err) {
+    console.error(err);
+    res.json({ items: [] });
+  }
 });
 
+// 4. DELETE
 app.delete("/api/delete/:id", async (req, res) => {
-  try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    await sb("DELETE", `/installations/${req.params.id}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.use(express.static(path.join(__dirname, "public")));
