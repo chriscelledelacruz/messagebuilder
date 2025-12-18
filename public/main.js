@@ -141,7 +141,6 @@ form.addEventListener("submit", async (e) => {
   e.preventDefault();
 
   const taskCsvFile = document.getElementById("taskCsv").files[0];
-  const profileCsvFile = document.getElementById("profileCsv").files[0];
   const title = document.getElementById("title").value.trim();
   const department = document.getElementById("department").value;
   const notify = document.getElementById("notify").checked;
@@ -166,10 +165,6 @@ form.addEventListener("submit", async (e) => {
     
     if (taskCsvFile) {
       formData.append("taskCsv", taskCsvFile);
-    }
-
-    if (profileCsvFile) {
-      formData.append("profileCsv", profileCsvFile);
     }
 
     const res = await fetch("/api/create", {
