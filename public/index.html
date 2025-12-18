@@ -2,56 +2,106 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Message Builder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ops Admin Portal</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <section class="card">
+
+  <div class="widget-container">
+    <div class="header">
+      <h2>Ops Admin Portal</h2>
+      <span class="badge-adhoc">ADHOC POST</span>
+    </div>
+
     <form id="form">
-      <div class="field">
-        <label>Store CSV (one ID per line)</label>
-        <label class="file-input-label">
-          Choose File
-          <input type="file" id="csv" name="csv" accept=".csv" required>
-        </label>
-        <span class="file-name" id="csvFileName">No file selected</span>
+      
+      <div class="form-group">
+        <label for="title">Post Title</label>
+        <input id="title" name="title" type="text" placeholder="e.g. Q4 Audit Requirements" required>
       </div>
 
-      <div class="field">
-        <label>Task CSV (title;description;date format, one task per line)</label>
-        <label class="file-input-label">
-          Choose File
-          <input type="file" id="taskCsv" name="taskCsv" accept=".csv">
-        </label>
-        <span class="file-name" id="taskCsvFileName">No file selected</span>
-      </div>
-
-      <div class="field">
-        <label for="department">Department</label>
+      <div class="form-group">
+        <label for="department">Category / Department</label>
         <select id="department" name="department" required>
-          <option value="">-- Select Department --</option>
+          <option value="">Select a category</option>
+          <option value="Merchandising">Merchandising</option>
           <option value="Marketing">Marketing</option>
-          <option value="IT">IT</option>
+          <option value="Audit">Audit</option>
+          <option value="Operations">Operations</option>
           <option value="HR">HR</option>
+          <option value="IT">IT</option>
         </select>
       </div>
 
-      <div class="field">
-        <label for="title">Post Title</label>
-        <input id="title" name="title" type="text" placeholder="Enter post title" required>
+      <div class="form-group">
+        <label>Target Stores (CSV)</label>
+        <span class="sub-label">Upload a CSV file containing a list of Store IDs (one per line).</span>
+        
+        <div class="file-drop-area">
+          <span class="file-msg" id="csvFileName">Drag and drop or click to select CSV</span>
+          <input type="file" id="csv" name="csv" accept=".csv" required>
+        </div>
       </div>
 
-      <div class="field checkbox">
+      <div class="form-group">
+        <label>Task List (CSV)</label>
+        <span class="sub-label">Cols: <code>Title;Description;Date</code></span>
+        
+        <div class="file-drop-area">
+          <span class="file-msg" id="taskCsvFileName">Drag and drop or click to select CSV</span>
+          <input type="file" id="taskCsv" name="taskCsv" accept=".csv">
+        </div>
+      </div>
+
+      <div class="form-group checkbox-group">
         <input type="checkbox" id="notify" name="notify">
-        <label for="notify">Send notification to users</label>
+        <label for="notify">Notify users in the new channel</label>
       </div>
 
-      <button type="submit">Create Post</button>
+      <button type="submit">Create Adhoc Post</button>
+      
       <div id="status"></div>
     </form>
-  </section>
+  </div>
 
-  <!-- Verification Modal -->
+  <div class="section-title-area">
+    <h3>Past Submissions</h3>
+    <button id="toggleFilters" class="post-link" style="margin:0;">Show Filters</button>
+  </div>
+    
+  <div class="filters-container" id="filtersContainer" style="display: none;">
+    <div>
+      <label>Department</label>
+      <select id="filterDepartment">
+        <option value="">All</option>
+        <option value="Marketing">Marketing</option>
+        <option value="IT">IT</option>
+        <option value="HR">HR</option>
+      </select>
+    </div>
+    <div>
+      <label>Search</label>
+      <input type="text" id="filterTitle" placeholder="Title...">
+    </div>
+    <div>
+      <label>Status</label>
+      <select id="filterStatus">
+        <option value="">All</option>
+        <option value="draft" selected>Draft</option>
+        <option value="published">Published</option>
+      </select>
+    </div>
+    <input type="date" id="filterDateFrom" style="display:none">
+    <input type="date" id="filterDateTo" style="display:none">
+    <select id="sortOrder" style="display:none"><option value="desc">Desc</option></select>
+    
+    <button id="resetFilters" class="post-link" style="height:44px; margin-top:22px;">Reset</button>
+  </div>
+
+  <div id="list"></div>
+
+
   <div id="verificationModal" class="modal" style="display: none;">
     <div class="modal-content">
       <h2>Verify Stores</h2>
@@ -60,67 +110,11 @@
       <div id="verificationContent"></div>
       
       <div class="modal-buttons">
-        <button id="confirmUsers" class="btn-confirm">Proceed</button>
-        <button id="cancelVerification" class="btn-cancel">Cancel</button>
+        <button id="cancelVerification" class="btn-cancel" style="background:#666; color:white; border:none; padding:10px 20px; border-radius:4px;">Cancel</button>
+        <button id="confirmUsers" class="btn-confirm" style="background:var(--se-green); color:white; border:none; padding:10px 20px; border-radius:4px;">Proceed</button>
       </div>
     </div>
   </div>
-
-  <section class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-      <h2 style="margin: 0;">Created Posts</h2>
-      <button id="toggleFilters" class="btn-toggle-filters">Show Filters</button>
-    </div>
-    
-    <div class="filters" id="filtersContainer" style="display: none;">
-      <div class="filter-group">
-        <label for="filterDepartment">Department</label>
-        <select id="filterDepartment">
-          <option value="">All Departments</option>
-          <option value="Marketing">Marketing</option>
-          <option value="IT">IT</option>
-          <option value="HR">HR</option>
-        </select>
-      </div>
-
-      <div class="filter-group">
-        <label for="filterTitle">Article Name</label>
-        <input type="text" id="filterTitle" placeholder="Search by title...">
-      </div>
-
-      <div class="filter-group">
-        <label for="sortOrder">Sort by Date</label>
-        <select id="sortOrder">
-          <option value="desc">Newest First</option>
-          <option value="asc">Oldest First</option>
-        </select>
-      </div>
-
-      <div class="filter-group">
-        <label for="filterDateFrom">From Date</label>
-        <input type="date" id="filterDateFrom">
-      </div>
-
-      <div class="filter-group">
-        <label for="filterDateTo">To Date</label>
-        <input type="date" id="filterDateTo">
-      </div>
-
-      <div class="filter-group">
-        <label for="filterStatus">Status</label>
-        <select id="filterStatus">
-          <option value="">All Statuses</option>
-          <option value="draft" selected>Draft</option>
-          <option value="published">Published</option>
-          <option value="scheduled">Scheduled</option>
-        </select>
-      </div>
-
-      <button id="resetFilters" class="btn-reset">Reset Filters</button>
-    </div>
-
-    <div id="list"></div>
-  </section>
 
   <script src="main.js"></script>
 </body>
