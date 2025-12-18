@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Message Builder</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <section class="card">
+    <form id="form">
+      <div class="field">
+        <label>Store CSV (one ID per line)</label>
+        <label class="file-input-label">
+          Choose File
+          <input type="file" id="csv" name="csv" accept=".csv" required>
+        </label>
+        <span class="file-name" id="csvFileName">No file selected</span>
+      </div>
+
+      <div class="field">
+        <label>Task CSV (title;description;date format, one task per line)</label>
+        <label class="file-input-label">
+          Choose File
+          <input type="file" id="taskCsv" name="taskCsv" accept=".csv">
+        </label>
+        <span class="file-name" id="taskCsvFileName">No file selected</span>
+      </div>
+
+      <div class="field">
+        <label for="department">Department</label>
+        <select id="department" name="department" required>
+          <option value="">-- Select Department --</option>
+          <option value="Marketing">Marketing</option>
+          <option value="IT">IT</option>
+          <option value="HR">HR</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="title">Post Title</label>
+        <input id="title" name="title" type="text" placeholder="Enter post title" required>
+      </div>
+
+      <div class="field checkbox">
+        <input type="checkbox" id="notify" name="notify">
+        <label for="notify">Send notification to users</label>
+      </div>
+
+      <button type="submit">Create Post</button>
+      <div id="status"></div>
+    </form>
+  </section>
+
+  <!-- Verification Modal -->
+  <div id="verificationModal" class="modal" style="display: none;">
+    <div class="modal-content">
+      <h2>Verify Stores</h2>
+      <p>Review the stores found in Staffbase before creating the post:</p>
+      
+      <div id="verificationContent"></div>
+      
+      <div class="modal-buttons">
+        <button id="confirmUsers" class="btn-confirm">Proceed</button>
+        <button id="cancelVerification" class="btn-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <section class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+      <h2 style="margin: 0;">Created Posts</h2>
+      <button id="toggleFilters" class="btn-toggle-filters">Show Filters</button>
+    </div>
+    
+    <div class="filters" id="filtersContainer" style="display: none;">
+      <div class="filter-group">
+        <label for="filterDepartment">Department</label>
+        <select id="filterDepartment">
+          <option value="">All Departments</option>
+          <option value="Marketing">Marketing</option>
+          <option value="IT">IT</option>
+          <option value="HR">HR</option>
+        </select>
+      </div>
+
+      <div class="filter-group">
+        <label for="filterTitle">Article Name</label>
+        <input type="text" id="filterTitle" placeholder="Search by title...">
+      </div>
+
+      <div class="filter-group">
+        <label for="sortOrder">Sort by Date</label>
+        <select id="sortOrder">
+          <option value="desc">Newest First</option>
+          <option value="asc">Oldest First</option>
+        </select>
+      </div>
+
+      <div class="filter-group">
+        <label for="filterDateFrom">From Date</label>
+        <input type="date" id="filterDateFrom">
+      </div>
+
+      <div class="filter-group">
+        <label for="filterDateTo">To Date</label>
+        <input type="date" id="filterDateTo">
+      </div>
+
+      <div class="filter-group">
+        <label for="filterStatus">Status</label>
+        <select id="filterStatus">
+          <option value="">All Statuses</option>
+          <option value="draft" selected>Draft</option>
+          <option value="published">Published</option>
+          <option value="scheduled">Scheduled</option>
+        </select>
+      </div>
+
+      <button id="resetFilters" class="btn-reset">Reset Filters</button>
+    </div>
+
+    <div id="list"></div>
+  </section>
+
+  <script src="main.js"></script>
+</body>
+</html>
