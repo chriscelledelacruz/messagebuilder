@@ -17,20 +17,26 @@ const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
 const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
 
 // API Helper
+// Staffbase API helper
 async function sb(method, path, body) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const options = {
     method,
     headers: {
-      "Authorization": STAFFBASE_TOKEN,
+      // FIX: Add 'Basic ' prefix to the token
+      "Authorization": `Basic ${STAFFBASE_TOKEN}`, 
       "Content-Type": "application/json"
     }
   };
   if (body) options.body = JSON.stringify(body);
 
+  console.log(`[API] ${method} ${url}`); // Optional: Debug log
+
   const res = await fetch(url, options);
   if (!res.ok) {
     const txt = await res.text();
+    // This logs the exact error you are seeing (401)
+    console.error(`[API Error] ${res.status}: ${txt}`); 
     throw new Error(`API ${res.status}: ${txt}`);
   }
   if (res.status === 204) return {};
