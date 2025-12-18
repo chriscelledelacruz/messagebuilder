@@ -151,7 +151,8 @@ app.post("/api/verify-users", async (req, res) => {
 });
 
 // 2. CREATE ADHOC POST & TASKS
-app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
+const cpUpload = upload.fields([{ name: 'taskCsv', maxCount: 1 }, { name: 'profileCsv', maxCount: 1 }]);
+app.post("/api/create", cpUpload, async (req, res) => {
   try {
     // Debug Incoming Data
     console.log("[CREATE] Payload:", { 
@@ -280,13 +281,49 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       }
     }
 
-    res.json({ success: true, channelId, postId: postRes.id, taskCount });
+    let importCount = 0;
+    if (req.files && req.files['profileCsv']) {
+      try {
+        console.log("Processing Profile CSV Import...");
+        const profileBuffer = req.files['profileCsv'][0].buffer;
+        
+        // We must send this raw buffer to Staffbase
+        // Note: Staffbase import API typically expects the raw CSV content body
+        // and Content-Type: text/csv
+        
+        const importUrl = `${STAFFBASE_BASE_URL}/users/imports`;
+        const importRes = await fetch(importUrl, {
+          method: "POST",
+          headers: {
+            "Authorization": `Basic ${STAFFBASE_TOKEN}`,
+            "Content-Type": "text/csv; charset=utf-8" // Important for CSV upload
+          },
+          body: profileBuffer
+        });
 
+        if (!importRes.ok) {
+          const errText = await importRes.text();
+          console.error("Profile Import Failed:", errText);
+          // We don't throw here to avoid failing the whole post creation, 
+          // but you could add a warning to the response.
+        } else {
+          const importData = await importRes.json();
+          importCount = 1; // Mark as success
+          console.log("Profile Import Success:", importData);
+        }
+      } catch (err) {
+        console.error("Profile Import Error:", err);
+      }
+    }
+
+      res.json({ success: true, channelId, postId: postRes.id, taskCount, importCount });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
+
+
 
 // 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
