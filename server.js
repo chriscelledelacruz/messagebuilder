@@ -309,15 +309,18 @@ app.get("/api/items", async (req, res) => {
         const extID = inst.externalID || "";
         
         // Use accessorIDs as a fallback if extraction fails
-        const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
-
+       const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
+    
+    // FIX 1: Use 'createdAt' (standard API) and fallback to 'created' just in case
+        const dateStr = inst.createdAt || inst.created || new Date().toISOString();
+    
         if (extID.startsWith('adhoc-') && !extID.includes('|') && !extID.includes('v2')) {
           item = {
             channelId: inst.id,
             title: title,
             department: "General", 
             userCount: defaultUserCount,
-            createdAt: inst.created || new Date().toISOString(),
+            createdAt: dateStr, // Used the fixed date
             status: "Draft"
           };
         }
@@ -327,20 +330,22 @@ app.get("/api/items", async (req, res) => {
              title: title,
              department: "Legacy",
              userCount: defaultUserCount,
-             createdAt: inst.created,
+             createdAt: dateStr, // FIX 2: Added the safe date here too
              status: "Draft"
            };
         }
         else if (title.startsWith('[external]')) {
           // Legacy external format
-          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
+          // FIX 3: Changed ([^ ]+) to (.*?) to capture multi-word departments like "Human Resources"
+          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::(.*?) - (.+)$/);
+          
           if (match) {
             item = {
               channelId: inst.id,
               title: match[4],
               department: match[3],
-              userCount: parseInt(match[1], 10), // <--- Add parseInt here
-              createdAt: inst.created || new Date().toISOString(),
+              userCount: parseInt(match[1], 10), 
+              createdAt: dateStr,
               status: "Draft"
             };
           }
