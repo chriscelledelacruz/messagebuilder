@@ -1,292 +1,268 @@
-const express = require("express");
-const multer = require("multer");
-const path = require("path");
-require("dotenv").config();
+const form = document.getElementById("form");
+const list = document.getElementById("list");
+const status = document.getElementById("status");
 
-const app = express();
+// File input elements
+const taskCsvInput = document.getElementById("taskCsv");
+const taskCsvFileName = document.getElementById("taskCsvFileName");
 
-// Middleware
-app.use(express.json({ limit: '10mb' })); 
-const upload = multer({ storage: multer.memoryStorage() });
-
-const STAFFBASE_BASE_URL = process.env.STAFFBASE_BASE_URL;
-const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
-const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
-const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
-
-// --- API HELPER ---
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-async function sb(method, path, body) {
-  const url = `${STAFFBASE_BASE_URL}${path}`;
-  const options = {
-    method,
-    headers: {
-      "Authorization": `Basic ${STAFFBASE_TOKEN}`, 
-      "Content-Type": "application/json"
-    }
-  };
-  if (body) options.body = JSON.stringify(body);
-
-  let retries = 3;
-  while (retries > 0) {
-    const res = await fetch(url, options);
-    if (res.status === 429) {
-      console.warn(`[API 429] Rate limit hit on ${path}, retrying...`);
-      await delay(1000);
-      retries--;
-      continue;
-    }
-    if (!res.ok) {
-      const txt = await res.text();
-      console.error(`[API Error] ${method} ${path}: ${res.status} - ${txt}`); 
-      throw new Error(`API ${res.status}: ${txt}`);
-    }
-    if (res.status === 204) return {};
-    return res.json();
-  }
-  throw new Error("API Timeout");
+// Update file name display
+if (taskCsvInput) {
+  taskCsvInput.addEventListener("change", () => {
+    taskCsvFileName.textContent = taskCsvInput.files.length > 0 ? taskCsvInput.files[0].name : "No file selected";
+  });
 }
 
-// --- LOGIC HELPERS ---
-async function batchVerifyUsers(storeIds) {
-  const foundUsers = [];
-  const notFoundIds = [];
-  const CONCURRENCY = 5; 
-  
-  const checkId = async (id) => {
-    try {
-      const res = await sb("GET", `/users?externalID=${encodeURIComponent(id)}`);
-      if (res.data && res.data.length > 0) {
-        // Strict match on externalID (String comparison)
-        const user = res.data.find(u => String(u.externalID) === String(id));
-        if (user) {
-          foundUsers.push({ id: user.id, csvId: id, name: `${user.firstName || ''} ${user.lastName || ''}`.trim() });
+// --- SMART SEARCH & PAGINATION LOGIC ---
+let validStores = [];
+let currentPage = 1;
+const ITEMS_PER_PAGE = 5;
+
+document.getElementById('verifyBtn').addEventListener('click', verifyStores);
+document.getElementById('prevPageBtn').addEventListener('click', () => changePage(-1));
+document.getElementById('nextPageBtn').addEventListener('click', () => changePage(1));
+
+async function verifyStores() {
+  const rawInput = document.getElementById('storeInput').value;
+  const resultsContainer = document.getElementById('resultsContainer');
+  const countMsg = document.getElementById('storeCountMsg');
+  const btn = document.getElementById('verifyBtn');
+
+  // Reset UI
+  validStores = [];
+  resultsContainer.style.display = 'none';
+  countMsg.textContent = '';
+  status.textContent = '';
+  status.className = '';
+
+  if (!rawInput.trim()) {
+    status.textContent = "Please enter Store IDs to verify.";
+    status.className = "status-error";
+    return;
+  }
+
+  // 1. Parse IDs from text
+  const searchIds = rawInput.split(/[\s,]+/).filter(Boolean);
+  const uniqueIds = [...new Set(searchIds)];
+
+  btn.textContent = "Verifying...";
+  btn.disabled = true;
+
+  try {
+    // 2. Send IDs to backend
+    const res = await fetch("/api/verify-users", {
+      method: "POST",
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ storeIds: uniqueIds })
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Verification failed");
+
+    // 3. Handle Results
+    validStores = data.foundUsers;
+    const notFoundCount = data.notFoundIds.length;
+    
+    // ERROR CODE UPDATE: Explicitly list failed IDs
+    if (notFoundCount > 0) {
+        const errorList = data.notFoundIds.join(', ');
+        if (validStores.length === 0) {
+             // Case: ALL failed
+             status.textContent = `✗ No valid stores found. The following IDs were not found: ${errorList}`;
+             status.className = "status-error";
         } else {
-          notFoundIds.push(id);
+             // Case: SOME failed
+             status.textContent = `⚠️ Warning: ${notFoundCount} IDs were not found: ${errorList}`;
+             status.className = "status-error"; // Yellow/Red warning style
         }
-      } else {
-        notFoundIds.push(id);
-      }
-    } catch (err) {
-      notFoundIds.push(id);
+    } else if (validStores.length > 0) {
+        // Case: ALL success
+        status.textContent = "✓ All stores verified successfully.";
+        status.className = "status-success";
     }
-  };
 
-  for (let i = 0; i < storeIds.length; i += CONCURRENCY) {
-    const chunk = storeIds.slice(i, i + CONCURRENCY);
-    await Promise.all(chunk.map(id => checkId(id)));
-  }
-  return { foundUsers, notFoundIds };
-}
+    // Show Table if we have ANY valid stores
+    if (validStores.length > 0) {
+      resultsContainer.style.display = 'block';
+      currentPage = 1;
+      renderStoreTable();
+      countMsg.textContent = `✓ Found ${validStores.length} valid stores ready for targeting.`;
+    } 
 
-function parseTaskCSV(buffer) {
-  try {
-    const text = buffer.toString("utf8");
-    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    const tasks = [];
-    lines.forEach(line => {
-      const [title, desc, date] = line.split(';').map(s => s ? s.trim() : '');
-      if (title) {
-        let dueDate = null;
-        if(date) dueDate = new Date(date).toISOString();
-        tasks.push({ title, description: desc || "", dueDate });
-      }
-    });
-    return tasks;
-  } catch (e) { return []; }
-}
-
-async function discoverProjectsByStoreIds(storeIds) {
-  const projectMap = {};
-  let offset = 0; const limit = 100;
-  while(true) {
-    const res = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
-    if(!res.data || res.data.length === 0) break;
-    res.data.forEach(inst => {
-      const title = inst.config?.localization?.en_US?.title || "";
-      const match = title.match(/^Store\s+(\w+)$/i);
-      if(match && storeIds.includes(match[1])) {
-        projectMap[match[1]] = inst.id;
-      }
-    });
-    if(res.data.length < limit) break;
-    offset += limit;
-  }
-  return projectMap;
-}
-
-// --- ROUTES ---
-
-app.post("/api/verify-users", async (req, res) => {
-  try {
-    const { storeIds } = req.body;
-    if (!storeIds || !Array.isArray(storeIds)) return res.status(400).json({ error: "Invalid storeIds" });
-    const result = await batchVerifyUsers(storeIds);
-    res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    status.textContent = "Error: " + err.message;
+    status.className = "status-error";
+  } finally {
+    btn.textContent = "Verify Stores";
+    btn.disabled = false;
   }
-});
+}
 
-// UPDATED CREATE ENDPOINT
-app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
+function renderStoreTable() {
+  const tbody = document.getElementById('storeTableBody');
+  tbody.innerHTML = '';
+  
+  const start = (currentPage - 1) * ITEMS_PER_PAGE;
+  const end = start + ITEMS_PER_PAGE;
+  const pageData = validStores.slice(start, end);
+
+  pageData.forEach(store => {
+    const row = `<tr>
+      <td><code>${store.csvId}</code></td>
+      <td>${store.name}</td>
+      <td style="color:var(--se-green); font-weight:bold;">Active</td>
+    </tr>`;
+    tbody.innerHTML += row;
+  });
+
+  const maxPage = Math.ceil(validStores.length / ITEMS_PER_PAGE) || 1;
+  document.getElementById('pageInfo').innerText = `Page ${currentPage} of ${maxPage}`;
+  document.getElementById('prevPageBtn').disabled = currentPage === 1;
+  document.getElementById('nextPageBtn').disabled = currentPage === maxPage;
+}
+
+function changePage(direction) {
+  const maxPage = Math.ceil(validStores.length / ITEMS_PER_PAGE);
+  if (direction === -1 && currentPage > 1) currentPage--;
+  if (direction === 1 && currentPage < maxPage) currentPage++;
+  renderStoreTable();
+}
+
+// --- FORM SUBMISSION ---
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const taskCsvFile = document.getElementById("taskCsv").files[0];
+  const title = document.getElementById("title").value.trim();
+  const department = document.getElementById("department").value;
+  const notify = document.getElementById("notify").checked;
+
+  if (validStores.length === 0) {
+    status.textContent = "Error: Please verify at least one valid store before creating a post.";
+    status.className = "status-error";
+    return;
+  }
+
+  status.textContent = "Processing... Creating post and tasks.";
+  status.className = "status-processing";
+
   try {
-    let { verifiedUsers, title, department } = req.body;
+    const formData = new FormData();
+    const storeIds = validStores.map(s => s.csvId);
     
-    // Parse the JSON string sent from frontend
-    if (typeof verifiedUsers === 'string') {
-      try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
-    }
-
-    if (!verifiedUsers || verifiedUsers.length === 0) {
-      return res.status(400).json({ error: "No verified users provided." });
-    }
-
-    // 1. Extract IDs directly (Skip re-verification!)
-    const userIds = verifiedUsers.map(u => u.id); // Internal Staffbase IDs
-    const storeIds = verifiedUsers.map(u => u.csvId); // External Store IDs (for tasks)
-
-    // 2. Generate Metadata
-    const now = Date.now();
-    const safeDept = (department || 'General').replace(/[^a-zA-Z0-9]/g, ''); 
-    // Format: adhoc-v2-{timestamp}-{count}-{department}
-    const metaExternalID = `adhoc-v2-${now}-${userIds.length}-${safeDept}`;
-
-    // 3. Create Channel
-    const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
-      pluginID: "news",
-      externalID: metaExternalID, 
-      config: {
-        localization: { en_US: { title: title }, de_DE: { title: title } }
-      },
-      accessorIDs: userIds
-    });
+    formData.append("storeIds", JSON.stringify(storeIds));
+    formData.append("title", title);
+    formData.append("department", department);
+    formData.append("notify", notify);
     
-    const channelId = channelRes.id;
+    if (taskCsvFile) {
+      formData.append("taskCsv", taskCsvFile);
+    }
 
-    // 4. Create Post
-    const postRes = await sb("POST", `/channels/${channelId}/posts`, {
-      contents: { 
-        en_US: { 
-          title: title, 
-          content: `<p><strong>Category:</strong> ${department}</p><p>Targeted Stores: ${userIds.length}</p>`, 
-          teaser: department 
-        } 
-      }
+    const res = await fetch("/api/create", {
+      method: "POST",
+      body: formData
     });
 
-    // 5. Handle Tasks
-    let taskCount = 0;
-    if (req.file) {
-      const tasks = parseTaskCSV(req.file.buffer);
-      if (tasks.length > 0) {
-        const projectMap = await discoverProjectsByStoreIds(storeIds);
-        const installationIds = Object.values(projectMap);
-        
-        const chunkedInsts = [];
-        for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || "Unknown error");
 
-        for (const chunk of chunkedInsts) {
-          await Promise.all(chunk.map(async (instId) => {
-            try {
-              const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
-              for (const t of tasks) {
-                await sb("POST", `/tasks/${instId}/task`, {
-                  taskListId: listRes.id,
-                  title: t.title,
-                  description: t.description,
-                  dueDate: t.dueDate,
-                  status: "OPEN",
-                  assigneeIds: [] 
-                });
-              }
-            } catch(e) { console.error(`Task error ${instId}`, e.message); }
-          }));
-        }
-        taskCount = tasks.length * installationIds.length;
-      }
-    }
-
-    res.json({ success: true, channelId, postId: postRes.id, taskCount });
+    status.textContent = "✓ Success! Reloading...";
+    status.className = "status-success";
+    
+    setTimeout(() => location.reload(), 1500);
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    status.textContent = "✗ Error: " + err.message;
+    status.className = "status-error";
   }
 });
 
-// 3. GET ITEMS (Hybrid: Supports New Hyphen V2 + Legacy)
-app.get("/api/items", async (req, res) => {
+// --- PAST SUBMISSIONS LIST ---
+const filterDepartment = document.getElementById("filterDepartment");
+const filterTitle = document.getElementById("filterTitle");
+const filterStatus = document.getElementById("filterStatus");
+const resetFilters = document.getElementById("resetFilters");
+const toggleFiltersBtn = document.getElementById("toggleFilters");
+const filtersContainer = document.getElementById("filtersContainer");
+
+let allItems = [];
+
+async function loadPersistedItems() {
   try {
-    const items = [];
-    let offset = 0; const limit = 100;
+    const res = await fetch("/api/items");
+    const data = await res.json();
+    allItems = data.items || [];
+    filterAndRenderItems();
+  } catch (err) { console.error(err); }
+}
 
-    while(true) {
-      const result = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
-      if (!result.data || result.data.length === 0) break;
+function filterAndRenderItems() {
+  const dept = filterDepartment.value;
+  const txt = filterTitle.value.toLowerCase();
+  const stat = filterStatus.value;
+  
+  let filtered = allItems.filter(item => {
+    if (dept && item.department !== dept) return false;
+    if (txt && !item.title.toLowerCase().includes(txt)) return false;
+    if (stat && stat !== 'draft' && item.status.toLowerCase() !== stat) return false; 
+    return true;
+  });
 
-      for (const inst of result.data) {
-        if (inst.pluginID !== 'news') continue;
-
-        let item = null;
-        const title = inst.config?.localization?.en_US?.title || "Untitled";
-        const extID = inst.externalID || "";
-
-        if (extID.startsWith('adhoc-v2-')) {
-          const parts = extID.split('-');
-          item = {
-            channelId: inst.id,
-            title: title,
-            department: parts[3] || "General",
-            userCount: parts[2] || "0",
-            createdAt: new Date(parseInt(parts[1])).toISOString(),
-            status: "Draft"
-          };
-        } 
-        else if (title.startsWith('[external]')) {
-          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
-          if (match) {
-            item = {
-              channelId: inst.id,
-              title: match[4],
-              department: match[3],
-              userCount: match[1],
-              createdAt: inst.created || new Date().toISOString(),
-              status: "Draft"
-            };
-          }
-        }
-
-        if (item) {
-          try {
-            const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
-            if (posts.data && posts.data.length > 0) {
-              const p = posts.data[0];
-              if (p.published) item.status = "Published";
-              else if (p.planned) item.status = "Scheduled";
-            }
-          } catch(e) {}
-          items.push(item);
-        }
-      }
-
-      if (result.data.length < limit) break;
-      offset += limit;
-    }
-
-    items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
-    res.json({ items });
-  } catch (err) {
-    res.json({ items: [] });
+  list.innerHTML = "";
+  if (filtered.length === 0) {
+    list.innerHTML = '<div style="text-align:center; color:#999; padding:20px;">No past submissions found</div>';
+    return;
   }
+
+  filtered.forEach(item => {
+    const div = document.createElement("div");
+    div.className = "item";
+    const editUrl = `https://app.staffbase.com/admin/plugin/news/${item.channelId}/posts`;
+    
+    // Status Badge Logic
+    let badgeClass = "tag-draft";
+    if (item.status === "Published") badgeClass = "tag-published";
+    if (item.status === "Scheduled") badgeClass = "tag-scheduled";
+
+    div.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
+        <div class="item-title" style="margin:0;"><strong>${item.title}</strong></div>
+        <span class="status-tag ${badgeClass}">${item.status}</span>
+      </div>
+      <div class="item-detail">Dept: ${item.department} | Users: ${item.userCount}</div>
+      <div class="item-detail">
+        <a href="${editUrl}" target="_blank" class="post-link">Edit Post</a>
+        <button class="btn-delete-post" data-id="${item.channelId}">Delete</button>
+      </div>
+      <div class="item-timestamp">${new Date(item.createdAt).toLocaleString()}</div>
+    `;
+    list.appendChild(div);
+  });
+  
+  attachDeleteListeners();
+}
+
+function attachDeleteListeners() {
+  document.querySelectorAll(".btn-delete-post").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      if(!confirm("Delete this channel and its posts?")) return;
+      await fetch(`/api/delete/${e.target.dataset.id}`, { method: "DELETE" });
+      location.reload();
+    });
+  });
+}
+
+// Event Listeners for Filters
+filterDepartment.addEventListener("change", filterAndRenderItems);
+filterTitle.addEventListener("input", filterAndRenderItems);
+filterStatus.addEventListener("change", filterAndRenderItems);
+resetFilters.addEventListener("click", () => {
+  filterDepartment.value = ""; filterTitle.value = ""; filterStatus.value = "draft";
+  filterAndRenderItems();
+});
+toggleFiltersBtn.addEventListener("click", () => {
+  filtersContainer.style.display = filtersContainer.style.display === "none" ? "grid" : "none";
 });
 
-app.delete("/api/delete/:id", async (req, res) => {
-  try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.use(express.static(path.join(__dirname, "public")));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
+document.addEventListener("DOMContentLoaded", loadPersistedItems);
