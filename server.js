@@ -5,6 +5,10 @@ require("dotenv").config();
 
 const app = express();
 
+// --- FIX 1: DISABLE ETAGS & CACHING TO PREVENT 304 ERRORS ---
+app.set('etag', false);
+app.disable('view cache');
+
 // Middleware
 app.use(express.json({ limit: '50mb' })); 
 
@@ -16,9 +20,9 @@ const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
 const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
 const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
 
-// --- API HELPER ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- API HELPER ---
 async function sb(method, path, body) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const options = {
@@ -34,6 +38,7 @@ async function sb(method, path, body) {
   while (retries > 0) {
     const res = await fetch(url, options);
     if (res.status === 429) {
+      console.warn(`[API 429] Rate limit hit. Waiting 2s...`);
       await delay(2000);
       retries--;
       continue;
@@ -51,12 +56,20 @@ async function sb(method, path, body) {
 
 // --- LOGIC HELPERS ---
 
+// Helper to clean HTML entities which break Regex
+function cleanText(text) {
+  if (!text) return "";
+  return text
+    .replace(/&nbsp;/gi, ' ')  // Replace non-breaking space
+    .replace(/&amp;/gi, '&')
+    .replace(/<[^>]+>/g, ' ')  // Strip HTML tags
+    .replace(/\s+/g, ' ')      // Collapse multiple spaces
+    .trim();
+}
+
 async function getAllUsersMap() {
   const userMap = new Map(); 
-  let offset = 0;
-  const limit = 100;
-  
-  // console.log("Fetching full user directory..."); // Commented out to reduce noise
+  let offset = 0; const limit = 100;
   
   while (true) {
     try {
@@ -73,15 +86,10 @@ async function getAllUsersMap() {
           });
         }
       }
-
       if (res.data.length < limit) break;
       offset += limit;
       if (offset % 1000 === 0) await delay(200); 
-
-    } catch (e) {
-      console.error("Error fetching page:", e.message);
-      break;
-    }
+    } catch (e) { break; }
   }
   return userMap;
 }
@@ -113,12 +121,10 @@ async function discoverProjectsByStoreIds(storeIds) {
     res.data.forEach(inst => {
       const title = inst.config?.localization?.en_US?.title || "";
       const match = title.match(/^Store\s*#?\s*(\w+)$/i);
-      
       if(match && storeIds.includes(match[1])) {
         projectMap[match[1]] = inst.id;
       }
     });
-    
     if(res.data.length < limit) break;
     offset += limit;
   }
@@ -141,27 +147,31 @@ app.post("/api/verify-users", async (req, res) => {
       else notFoundIds.push(id);
     }
     res.json({ foundUsers, notFoundIds });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // 2. CREATE ADHOC POST & TASKS
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
-    // --- DEBUG LOG START ---
-    console.log("[CREATE] Raw Body:", req.body);
-    // --- DEBUG LOG END ---
+    // Debug Incoming Data
+    console.log("[CREATE] Payload:", { 
+      hasFile: !!req.file, 
+      title: req.body.title, 
+      dept: req.body.department 
+    });
 
     let { verifiedUsers, title, department } = req.body;
-    
-    // Ensure department has a fallback
-    if (!department || department === 'undefined') department = "Uncategorized";
+
+    // --- FIX 2: Prevent "undefined" Department ---
+    if (!department || department === 'undefined' || department.trim() === '') {
+        department = "Uncategorized";
+    }
 
     if (typeof verifiedUsers === 'string') {
       try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
 
+    // Fallback logic if verifying in frontend failed
     if (!verifiedUsers || verifiedUsers.length === 0) {
        let { storeIds } = req.body;
        if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
@@ -184,7 +194,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     const userIds = verifiedUsers.map(u => u.id);
     const storeIds = verifiedUsers.map(u => u.csvId);
 
-    console.log(`[CREATE] Verified: ${userIds.length} users. Department: ${department}`);
+    console.log(`[CREATE] Final: ${userIds.length} users. Dept: "${department}"`);
 
     const now = Date.now();
     const metaExternalID = `adhoc-${now}`;
@@ -201,9 +211,9 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     
     const channelId = channelRes.id;
 
-    // B. Create Post
-    // We are baking the metadata into the HTML here
-    const contentHTML = `<p><strong>Category:</strong> ${department}</p><p>Targeted Stores: ${userIds.length}</p>`;
+    // B. Create Post (Embed Metadata reliably)
+    // We add spaces inside the HTML to help the parser later
+    const contentHTML = `<p><strong>Category:</strong> ${department}</p> <p><strong>Targeted Stores:</strong> ${userIds.length}</p>`;
     
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
@@ -222,7 +232,6 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       if (tasks.length > 0) {
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
-        
         const chunkedInsts = [];
         for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
 
@@ -257,8 +266,10 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
 // 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
-  // DISABLE CACHE
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  // --- FIX 3: AGGRESSIVE CACHE BUSTING ---
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   
   try {
     const items = [];
@@ -274,13 +285,16 @@ app.get("/api/items", async (req, res) => {
         let item = null;
         const title = inst.config?.localization?.en_US?.title || "Untitled";
         const extID = inst.externalID || "";
+        
+        // Use accessorIDs as a fallback if extraction fails
+        const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
 
         if (extID.startsWith('adhoc-') && !extID.includes('|') && !extID.includes('v2')) {
           item = {
             channelId: inst.id,
             title: title,
             department: "General", 
-            userCount: 0, 
+            userCount: defaultUserCount,
             createdAt: inst.created || new Date().toISOString(),
             status: "Draft"
           };
@@ -290,14 +304,24 @@ app.get("/api/items", async (req, res) => {
              channelId: inst.id,
              title: title,
              department: "Legacy",
-             userCount: inst.accessorIDs ? inst.accessorIDs.length : 0,
+             userCount: defaultUserCount,
              createdAt: inst.created,
              status: "Draft"
            };
         }
         else if (title.startsWith('[external]')) {
-           // External logic logic...
-           // (Kept simple for brevity, assumed legacy)
+          // Legacy external format
+          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
+          if (match) {
+            item = {
+              channelId: inst.id,
+              title: match[4],
+              department: match[3],
+              userCount: match[1],
+              createdAt: inst.created || new Date().toISOString(),
+              status: "Draft"
+            };
+          }
         }
 
         if (item) {
@@ -305,16 +329,18 @@ app.get("/api/items", async (req, res) => {
             const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
-              let rawContent = p.contents?.en_US?.content || "";
+              const rawContent = p.contents?.en_US?.content || "";
               
-              // --- FIX: TEXT-FIRST STRATEGY ---
-              const plainText = rawContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-              
-              // console.log(`[Item ${item.channelId}] Reading Text: "${plainText}"`);
+              // --- FIX 4: CLEAN TEXT EXTRACTION ---
+              // Decodes &nbsp; to space, strips tags, trims whitespace
+              const plainText = cleanText(rawContent);
+
+              // Logging to help debug if it fails again
+              console.log(`[Item ${item.channelId}] Scanned: "${plainText}"`);
 
               // 1. Extract Department
-              // Look for "Category:" followed by text, until "Targeted" or End of String
-              const deptMatch = plainText.match(/Category:\s*(.*?)(?=\s*Targeted Stores:|$)/i);
+              // Matches "Category:" followed by text until "Targeted" or End
+              const deptMatch = plainText.match(/Category:\s*(.*?)(?=\s*Targeted Stores|Targeted|$)/i);
               if (deptMatch && deptMatch[1]) {
                  item.department = deptMatch[1].trim();
               } else if (p.contents?.en_US?.teaser) {
