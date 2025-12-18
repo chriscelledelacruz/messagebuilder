@@ -5,6 +5,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ops Admin Portal</title>
   <link rel="stylesheet" href="style.css">
+  <style>
+    /* Additions for the Smart Search UI */
+    .smart-search-area { position: relative; }
+    textarea.store-input {
+      width: 100%; height: 120px; padding: 12px;
+      border: 2px solid var(--border-color); border-radius: 6px;
+      font-family: 'Monaco', 'Menlo', monospace; font-size: 0.9rem;
+      resize: vertical;
+    }
+    textarea.store-input:focus { border-color: var(--se-green); outline: none; }
+    
+    .verify-btn {
+      margin-top: 8px; background-color: #666; color: white;
+      padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer;
+      font-size: 0.9rem; width: auto; display: inline-block;
+    }
+    
+    /* Pagination Table */
+    .results-container {
+      margin-top: 15px; border: 1px solid #eee; border-radius: 6px; overflow: hidden; display: none;
+    }
+    table.results-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    .results-table th { background: #f4f6f8; text-align: left; padding: 10px; font-weight: 600; border-bottom: 1px solid #eee; }
+    .results-table td { padding: 8px 10px; border-bottom: 1px solid #eee; }
+    
+    .pagination {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px; background: #fff; border-top: 1px solid #eee;
+    }
+    .page-btn {
+      padding: 4px 10px; background: #eee; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem;
+    }
+    .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  </style>
 </head>
 <body>
 
@@ -35,19 +69,33 @@
       </div>
 
       <div class="form-group">
-        <label>Target Stores (CSV)</label>
-        <span class="sub-label">Upload a CSV file containing a list of Store IDs (one per line).</span>
+        <label>Target Stores (Smart Search)</label>
+        <span class="sub-label">Paste Store IDs below. Spaces, commas, or new lines act as separators.</span>
         
-        <div class="file-drop-area">
-          <span class="file-msg" id="csvFileName">Drag and drop or click to select CSV</span>
-          <input type="file" id="csv" name="csv" accept=".csv" required>
+        <div class="smart-search-area">
+          <textarea id="storeInput" class="store-input" placeholder="Paste IDs here (e.g., 10001 10002 10005)..."></textarea>
+          <button type="button" class="verify-btn" id="verifyBtn">Verify Stores</button>
         </div>
+
+        <div class="results-container" id="resultsContainer">
+          <table class="results-table">
+            <thead>
+              <tr><th>Store ID</th><th>Name</th><th>Status</th></tr>
+            </thead>
+            <tbody id="storeTableBody"></tbody>
+          </table>
+          <div class="pagination">
+            <button type="button" class="page-btn" id="prevPageBtn">Previous</button>
+            <span class="sub-label" id="pageInfo" style="margin:0;">Page 1</span>
+            <button type="button" class="page-btn" id="nextPageBtn">Next</button>
+          </div>
+        </div>
+        <p id="storeCountMsg" style="font-size: 0.9rem; color: var(--se-green); font-weight:bold; margin-top:8px;"></p>
       </div>
 
       <div class="form-group">
         <label>Task List (CSV)</label>
         <span class="sub-label">Cols: <code>Title;Description;Date</code></span>
-        
         <div class="file-drop-area">
           <span class="file-msg" id="taskCsvFileName">Drag and drop or click to select CSV</span>
           <input type="file" id="taskCsv" name="taskCsv" accept=".csv">
@@ -60,7 +108,6 @@
       </div>
 
       <button type="submit">Create Adhoc Post</button>
-      
       <div id="status"></div>
     </form>
   </div>
@@ -71,51 +118,14 @@
   </div>
     
   <div class="filters-container" id="filtersContainer" style="display: none;">
-    <div>
-      <label>Department</label>
-      <select id="filterDepartment">
-        <option value="">All</option>
-        <option value="Marketing">Marketing</option>
-        <option value="IT">IT</option>
-        <option value="HR">HR</option>
-      </select>
-    </div>
-    <div>
-      <label>Search</label>
-      <input type="text" id="filterTitle" placeholder="Title...">
-    </div>
-    <div>
-      <label>Status</label>
-      <select id="filterStatus">
-        <option value="">All</option>
-        <option value="draft" selected>Draft</option>
-        <option value="published">Published</option>
-      </select>
-    </div>
-    
-    <input type="date" id="filterDateFrom" style="display:none">
-    <input type="date" id="filterDateTo" style="display:none">
-    <select id="sortOrder" style="display:none"><option value="desc">Desc</option></select>
-    
+    <div><label>Department</label><select id="filterDepartment"><option value="">All</option><option value="Marketing">Marketing</option><option value="IT">IT</option><option value="HR">HR</option></select></div>
+    <div><label>Search</label><input type="text" id="filterTitle" placeholder="Title..."></div>
+    <div><label>Status</label><select id="filterStatus"><option value="">All</option><option value="draft" selected>Draft</option><option value="published">Published</option></select></div>
+    <input type="date" id="filterDateFrom" style="display:none"><input type="date" id="filterDateTo" style="display:none"><select id="sortOrder" style="display:none"><option value="desc">Desc</option></select>
     <button id="resetFilters" class="post-link" style="height:44px; margin-top:22px;">Reset</button>
   </div>
 
   <div id="list"></div>
-
-  <div id="verificationModal" class="modal" style="display: none;">
-    <div class="modal-content">
-      <h2 style="margin-top:0;">Verify Stores</h2>
-      <p>Review the stores found in Staffbase before creating the post:</p>
-      
-      <div id="verificationContent"></div>
-      
-      <div class="modal-buttons">
-        <button id="cancelVerification" class="btn-cancel">Cancel</button>
-        <button id="confirmUsers" class="btn-confirm">Proceed</button>
-      </div>
-    </div>
-  </div>
-
   <script src="main.js"></script>
 </body>
 </html>
