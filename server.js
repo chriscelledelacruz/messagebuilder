@@ -199,6 +199,29 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     const now = Date.now();
     const metaExternalID = `adhoc-${now}`;
 
+    // --- NEW SECTION START: Parse Tasks Early ---
+    let tasks = [];
+    let taskListHTML = "";
+    
+    if (req.file) {
+      tasks = parseTaskCSV(req.file.buffer);
+      
+      if (tasks.length > 0) {
+        taskListHTML = "<h3>Action Items</h3><ul>";
+        tasks.forEach(t => {
+          // Format date if it exists
+          let dateDisplay = "";
+          if (t.dueDate) {
+             const d = new Date(t.dueDate);
+             dateDisplay = ` <span style="color:#666; font-size:0.9em;">(Due: ${d.toLocaleDateString()})</span>`;
+          }
+          taskListHTML += `<li><strong>${t.title}</strong><br>${t.description || ""}${dateDisplay}</li>`;
+        });
+        taskListHTML += "</ul>";
+      }
+    }
+    // --- NEW SECTION END ---
+
     // A. Create Channel
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
@@ -213,8 +236,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
     // B. Create Post (Embed Metadata reliably)
     // We add spaces inside the HTML to help the parser later
-    const contentHTML = `<p><strong>Category:</strong> ${department}</p> <p><strong>Targeted Stores:</strong> ${userIds.length}</p>`;
-    
+    const contentHTML = `<p><strong>Category:</strong> ${department}</p> <p><strong>Targeted Stores:</strong> ${userIds.length}</p><hr>${taskListHTML}`;    
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
