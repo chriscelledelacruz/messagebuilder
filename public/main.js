@@ -230,7 +230,7 @@ function filterAndRenderItems() {
         <div class="item-title" style="margin:0;"><strong>${item.title}</strong></div>
         <span class="status-tag ${badgeClass}">${item.status}</span>
       </div>
-      <div class="item-detail">Dept: ${item.department} | Users: ${item.userCount}</div>
+      <div class="item-detail">Category: ${item.department} | Stores: ${item.userCount}</div>
       <div class="item-detail">
         <a href="${editUrl}" target="_blank" class="post-link">Edit Post</a>
         <button class="btn-delete-post" data-id="${item.channelId}">Delete</button>
