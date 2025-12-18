@@ -294,104 +294,103 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 });
 
 // 3. GET PAST SUBMISSIONS
+// 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
   try {
     const items = [];
-    let offset = 0; const limit = 100;
+    let offset = 0;
+    const limit = 100;
 
-    while(true) {
+    while (true) {
+      // Fetch installations
       const result = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
       if (!result.data || result.data.length === 0) break;
 
       for (const inst of result.data) {
         if (inst.pluginID !== 'news') continue;
 
-        let item = null;
-        const title = inst.config?.localization?.en_US?.title || "Untitled";
+        let item = {
+          channelId: inst.id,
+          title: inst.config?.localization?.en_US?.title || "Untitled",
+          department: null, // Leave these unset initially
+          userCount: null,
+          createdAt: inst.created || new Date().toISOString(),
+          status: "Draft",
+        };
+
         const extID = inst.externalID || "";
 
-        // STRATEGY A: New "Safe" Format (adhoc-123456789)
-        if (extID.startsWith('adhoc-') && !extID.includes('|') && !extID.includes('v2')) {
-          item = {
-            channelId: inst.id,
-            title: title,
-            department: "General", 
-            userCount: 0, 
-            createdAt: inst.created || new Date().toISOString(),
-            status: "Draft"
-          };
-        }
-        // STRATEGY B: Legacy Support
-        else if (extID.startsWith('adhoc-v2') || extID.startsWith('adhoc_v2')) {
-           item = {
-             channelId: inst.id,
-             title: title,
-             department: "Legacy",
-             userCount: inst.accessorIDs ? inst.accessorIDs.length : 0,
-             createdAt: inst.created,
-             status: "Draft"
-           };
-        }
-        else if (title.startsWith('[external]')) {
-          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
+        // Determine department and user count based on external ID or post content
+        if (extID.startsWith('adhoc-')) {
+          item.department = "General"; // Safe default for new format without parsing issues
+          item.userCount = 0;
+        } else if (extID.startsWith('adhoc-v2')) {
+          item.department = "Legacy";
+          item.userCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
+        } else if (extID.startsWith('[external]')) {
+          const match = extID.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
           if (match) {
-            item = {
-              channelId: inst.id,
-              title: match[4],
-              department: match[3],
-              userCount: match[1],
-              createdAt: inst.created || new Date().toISOString(),
-              status: "Draft"
-            };
+            item.department = match[3];
+            item.userCount = parseInt(match[1], 10);
           }
         }
 
-        if (item) {
-          try {
-            const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
-            if (posts.data && posts.data.length > 0) {
-              const p = posts.data[0];
-              let rawContent = p.contents?.en_US?.content || "";
-              
-              // --- FIX: TEXT-FIRST STRATEGY ---
-              // 1. Strip ALL HTML tags to get pure text.
-              // Example: "<p><strong>Category:</strong> HR</p>" -> "Category: HR"
-              const plainText = rawContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-              
-              console.log(`[Item ${item.channelId}] Extracted Text: "${plainText}"`);
+        // Fetch posts for this installation to extract more details
+        try {
+          const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
+          if (posts.data && posts.data.length > 0) {
+            const p = posts.data[0];
+            const rawContent = p.contents?.en_US?.content || "";
 
-              // 2. Extract Department using text matching
-              const deptMatch = plainText.match(/Category:\s*([^Targeted]*)/i);
-              if (deptMatch && deptMatch[1]) {
-                 item.department = deptMatch[1].trim();
-              } else if (p.contents?.en_US?.teaser) {
-                 item.department = p.contents.en_US.teaser; 
-              }
+            // Parse plain text from HTML content
+            const plainText = rawContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+            console.log(`[DEBUG] Extracted plainText: ${plainText}`);
 
-              // 3. Extract User Count
-              const countMatch = plainText.match(/Targeted Stores:\s*(\d+)/i);
-              if (countMatch && countMatch[1]) {
-                item.userCount = parseInt(countMatch[1], 10);
-              }
-              // -------------------------------------------------------------
-              
-              if (p.published) item.status = "Published";
-              else if (p.planned) item.status = "Scheduled";
+            // Extract department from plain text
+            const deptMatch = plainText.match(/Category:\s*([^:]*?)(\s|$)/i);
+            if (deptMatch && deptMatch[1]) {
+              item.department = deptMatch[1].trim();
+            } else if (p.contents?.en_US?.teaser) {
+              item.department = p.contents.en_US.teaser;
+            } else {
+              console.warn(`[WARNING] No department found in plainText: "${plainText}"`);
+              item.department = "Unknown"; // Fallback if parsing fails
             }
-          } catch(e) { console.error(e); }
-          items.push(item);
+
+            // Extract store count from plain text
+            const countMatch = plainText.match(/Targeted\s+Stores:\s*(\d+)/i);
+            if (countMatch && countMatch[1]) {
+              item.userCount = parseInt(countMatch[1], 10);
+            } else {
+              console.warn(`[WARNING] No store count found in plainText: "${plainText}"`);
+              item.userCount = 0; // Fallback if parsing fails
+            }
+
+            // Update status based on data
+            if (p.published) {
+              item.status = "Published";
+            } else if (p.planned) {
+              item.status = "Scheduled";
+            }
+          }
+        } catch (err) {
+          console.error(`[ERROR] Failed to fetch posts for channel ${item.channelId}: ${err.message}`);
         }
+
+        items.push(item);
       }
 
       if (result.data.length < limit) break;
       offset += limit;
     }
 
-    items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+    // Sort items by date (newest first)
+    items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ items });
+
   } catch (err) {
-    console.error("List Error:", err);
-    res.json({ items: [] });
+    console.error("[ERROR] Failed to fetch items:", err.message);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
