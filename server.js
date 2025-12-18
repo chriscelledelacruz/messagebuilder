@@ -317,7 +317,7 @@ app.get("/api/items", async (req, res) => {
               channelId: inst.id,
               title: match[4],
               department: match[3],
-              userCount: match[1],
+              userCount: parseInt(match[1], 10), // <--- Add parseInt here
               createdAt: inst.created || new Date().toISOString(),
               status: "Draft"
             };
