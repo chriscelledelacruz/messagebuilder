@@ -136,7 +136,7 @@ app.post("/api/verify-users", async (req, res) => {
   }
 });
 
-// 2. CREATE ADHOC POST (Updated with specific error reporting)
+// 2. CREATE ADHOC POST (The Main Chain)
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
     let { storeIds, title, department } = req.body;
@@ -147,9 +147,9 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
     if (!storeIds || storeIds.length === 0) return res.status(400).json({ error: "No stores provided" });
 
-    // A. Resolve Users & Track Failures
+    // A. Resolve Users
     const userIds = [];
-    const failedIds = []; // Track IDs that fail resolution
+    const failedIds = [];
     
     for (const id of storeIds) {
       const user = await findUserByHiddenId(id);
@@ -160,16 +160,18 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       }
     }
 
-    // ERROR REPORTING UPDATE: Return specific failed IDs
     if (userIds.length === 0) {
       return res.status(404).json({ 
-        error: `No valid users found. The following IDs could not be resolved: ${failedIds.join(', ')}` 
+        error: `No valid users found. Failed IDs: ${failedIds.join(', ')}` 
       });
     }
 
-    // B. Generate Metadata
+    // B. Generate Metadata (FIXED: Using Underscores)
     const now = Date.now();
-    const metaExternalID = `adhoc_v2|${now}|${userIds.length}|${department.replace(/\|/g, '-')}`;
+    // Remove spaces and special chars from department for the ID
+    const safeDept = department.replace(/[^a-zA-Z0-9]/g, ''); 
+    // Format: adhoc_v2_{timestamp}_{count}_{department}
+    const metaExternalID = `adhoc_v2_${now}_${userIds.length}_${safeDept}`;
 
     // C. Create Channel
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
@@ -233,7 +235,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   }
 });
 
-// 3. GET ITEMS (Hybrid: V2 + Legacy)
+// 3. GET ITEMS (Updated to read new underscore format)
 app.get("/api/items", async (req, res) => {
   try {
     const items = [];
@@ -251,19 +253,19 @@ app.get("/api/items", async (req, res) => {
         const title = inst.config?.localization?.en_US?.title || "Untitled";
         const extID = inst.externalID || "";
 
-        // Strategy A: New V2
-        if (extID.startsWith('adhoc_v2|')) {
-          const parts = extID.split('|');
+        // STRATEGY A: New V2 (Underscore)
+        if (extID.startsWith('adhoc_v2_')) {
+          const parts = extID.split('_');
           item = {
             channelId: inst.id,
             title: title,
-            department: parts[3] || "General",
+            department: parts[3] || "General", // Index 3 matches the construction above
             userCount: parts[2] || "0",
             createdAt: new Date(parseInt(parts[1])).toISOString(),
             status: "Draft"
           };
         } 
-        // Strategy B: Legacy
+        // STRATEGY B: Legacy Support (Title based)
         else if (title.startsWith('[external]')) {
           const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::([^ ]+) - (.+)$/);
           if (match) {
