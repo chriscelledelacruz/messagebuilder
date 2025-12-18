@@ -1,4 +1,132 @@
-// ... existing code ...
+const form = document.getElementById("form");
+const list = document.getElementById("list");
+const status = document.getElementById("status");
+
+// File input elements
+const taskCsvInput = document.getElementById("taskCsv");
+const taskCsvFileName = document.getElementById("taskCsvFileName");
+
+// Update file name display
+if (taskCsvInput) {
+  taskCsvInput.addEventListener("change", () => {
+    taskCsvFileName.textContent = taskCsvInput.files.length > 0 ? taskCsvInput.files[0].name : "No file selected";
+  });
+}
+
+// --- SMART SEARCH & PAGINATION LOGIC ---
+let validStores = [];
+let currentPage = 1;
+const ITEMS_PER_PAGE = 5;
+
+document.getElementById('verifyBtn').addEventListener('click', verifyStores);
+document.getElementById('prevPageBtn').addEventListener('click', () => changePage(-1));
+document.getElementById('nextPageBtn').addEventListener('click', () => changePage(1));
+
+async function verifyStores() {
+  const rawInput = document.getElementById('storeInput').value;
+  const resultsContainer = document.getElementById('resultsContainer');
+  const countMsg = document.getElementById('storeCountMsg');
+  const btn = document.getElementById('verifyBtn');
+
+  // Reset UI
+  validStores = [];
+  resultsContainer.style.display = 'none';
+  countMsg.textContent = '';
+  status.textContent = '';
+  status.className = '';
+
+  if (!rawInput.trim()) {
+    status.textContent = "Please enter Store IDs to verify.";
+    status.className = "status-error";
+    return;
+  }
+
+  // 1. Parse IDs from text
+  const searchIds = rawInput.split(/[\s,]+/).filter(Boolean);
+  const uniqueIds = [...new Set(searchIds)];
+
+  btn.textContent = "Verifying...";
+  btn.disabled = true;
+
+  try {
+    // 2. Send IDs to backend
+    const res = await fetch("/api/verify-users", {
+      method: "POST",
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ storeIds: uniqueIds })
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Verification failed");
+
+    // 3. Handle Results
+    validStores = data.foundUsers;
+    const notFoundCount = data.notFoundIds.length;
+    
+    // ERROR CODE UPDATE: Explicitly list failed IDs
+    if (notFoundCount > 0) {
+        const errorList = data.notFoundIds.join(', ');
+        if (validStores.length === 0) {
+             // Case: ALL failed
+             status.textContent = `✗ No valid stores found. The following IDs were not found: ${errorList}`;
+             status.className = "status-error";
+        } else {
+             // Case: SOME failed
+             status.textContent = `⚠️ Warning: ${notFoundCount} IDs were not found: ${errorList}`;
+             status.className = "status-error"; 
+        }
+    } else if (validStores.length > 0) {
+        // Case: ALL success
+        status.textContent = "✓ All stores verified successfully.";
+        status.className = "status-success";
+    }
+
+    // Show Table if we have ANY valid stores
+    if (validStores.length > 0) {
+      resultsContainer.style.display = 'block';
+      currentPage = 1;
+      renderStoreTable();
+      countMsg.textContent = `✓ Found ${validStores.length} valid stores ready for targeting.`;
+    } 
+
+  } catch (err) {
+    status.textContent = "Error: " + err.message;
+    status.className = "status-error";
+  } finally {
+    btn.textContent = "Verify Stores";
+    btn.disabled = false;
+  }
+}
+
+function renderStoreTable() {
+  const tbody = document.getElementById('storeTableBody');
+  tbody.innerHTML = '';
+  
+  const start = (currentPage - 1) * ITEMS_PER_PAGE;
+  const end = start + ITEMS_PER_PAGE;
+  const pageData = validStores.slice(start, end);
+
+  pageData.forEach(store => {
+    const row = `<tr>
+      <td><code>${store.csvId}</code></td>
+      <td>${store.name}</td>
+      <td style="color:var(--se-green); font-weight:bold;">Active</td>
+    </tr>`;
+    tbody.innerHTML += row;
+  });
+
+  const maxPage = Math.ceil(validStores.length / ITEMS_PER_PAGE) || 1;
+  document.getElementById('pageInfo').innerText = `Page ${currentPage} of ${maxPage}`;
+  document.getElementById('prevPageBtn').disabled = currentPage === 1;
+  document.getElementById('nextPageBtn').disabled = currentPage === maxPage;
+}
+
+function changePage(direction) {
+  const maxPage = Math.ceil(validStores.length / ITEMS_PER_PAGE);
+  if (direction === -1 && currentPage > 1) currentPage--;
+  if (direction === 1 && currentPage < maxPage) currentPage++;
+  renderStoreTable();
+}
 
 // --- FORM SUBMISSION ---
 form.addEventListener("submit", async (e) => {
@@ -21,8 +149,8 @@ form.addEventListener("submit", async (e) => {
   try {
     const formData = new FormData();
     
-    // CHANGE 1: Send the full 'validStores' object (contains both csvId AND internal id)
-    // We send this as a JSON string so the backend can just use the IDs we already found.
+    // === CRITICAL FIX: Send 'verifiedUsers' instead of 'storeIds' ===
+    // This allows the server to skip looking them up again
     formData.append("verifiedUsers", JSON.stringify(validStores));
     
     formData.append("title", title);
@@ -46,10 +174,4 @@ form.addEventListener("submit", async (e) => {
     
     setTimeout(() => location.reload(), 1500);
 
-  } catch (err) {
-    status.textContent = "✗ Error: " + err.message;
-    status.className = "status-error";
-  }
-});
-
-// ... existing Past Submissions code ...
+  } catch (err)
