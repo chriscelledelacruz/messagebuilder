@@ -236,12 +236,14 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
     // B. Create Post (Embed Metadata reliably)
     // We add spaces inside the HTML to help the parser later
-    const contentHTML = `<p>Category: ${department} Targeted Stores: ${userIds.length}</p><hr>${taskListHTML}`; 
+    const contentHTML = `${title}<hr>${taskListHTML}`;
+    const contentTeaser = `Category: ${department}; Targeted Stores: ${userIds.length}`
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
           title: title, 
-          content: contentHTML, 
+          content: contentHTML,
+          teaser: contentTeaser,
           kicker: department 
         } 
       }
@@ -347,47 +349,44 @@ app.get("/api/items", async (req, res) => {
             const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
-              const rawContent = p.contents?.en_US?.content || "";
               
-              // --- FIX 4: CLEAN TEXT EXTRACTION ---
-              // Decodes &nbsp; to space, strips tags, trims whitespace
-              const plainText = cleanText(rawContent);
+              // 1. Get the source text (Prioritize Teaser)
+              const teaserText = p.contents?.en_US?.teaser || "";
+              const kickerText = p.contents?.en_US?.kicker || "";
+              const rawContent = p.contents?.en_US?.content || "";
+              const plainBodyText = cleanText(rawContent);
 
-              // Logging to help debug if it fails again
-              console.log(`[Item ${item.channelId}] Scanned: "${plainText}"`);
-
-              // 1. Extract Department
-              // Matches "Category:" followed by text until "Targeted" or End
-              // 1. Define your valid departments (The "Source of Truth")
-              // Matches "Category:" OR "Department:"
-              const deptMatch = plainText.match(/(?:Category):?\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
+              // 2. EXTRACT DEPARTMENT
+              // First try the Teaser
+              let deptMatch = teaserText.match(/(?:Category|Department):\s*([^;]+)/i);
               
               if (deptMatch && deptMatch[1]) {
-                  // FIX: Trust the extracted text directly. 
                   item.department = deptMatch[1].trim(); 
               } 
-              // Fallback: Check 'kicker' (where you save it) OR 'teaser'
-              else if (p.contents?.en_US?.kicker) {
-                  item.department = p.contents.en_US.kicker.trim();
+              // Fallback: Check Kicker
+              else if (kickerText) {
+                  item.department = kickerText.trim();
               }
-              else if (p.contents?.en_US?.teaser) {
-                  item.department = p.contents.en_US.teaser.trim();
+              // Fallback: Check Body (Legacy support)
+              else {
+                  deptMatch = plainBodyText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
+                  if (deptMatch && deptMatch[1]) item.department = deptMatch[1].trim();
               }
-              
-              
-              //const deptMatch = plainText.match(/Category:\s*(.*?)(?=\s*Targeted Stores|Targeted|$)/i);
-              //if (deptMatch && deptMatch[1]) {
-               //  item.department = deptMatch[1].trim();
-              //} else if (p.contents?.en_US?.teaser) {
-              //   item.department = p.contents.en_US.teaser; 
-              //}
 
-              // 2. Extract User Count
-              const countMatch = plainText.match(/Targeted Stores:\s*(\d+)/i);
+              // 3. EXTRACT USER COUNT
+              // First try the Teaser
+              let countMatch = teaserText.match(/Targeted Stores:\s*(\d+)/i);
+              
               if (countMatch && countMatch[1]) {
-                item.userCount = parseInt(countMatch[1], 10);
+                  item.userCount = parseInt(countMatch[1], 10);
+              } 
+              // Fallback: Check Body (Legacy support)
+              else {
+                  countMatch = plainBodyText.match(/Targeted Stores:\s*(\d+)/i);
+                  if (countMatch && countMatch[1]) item.userCount = parseInt(countMatch[1], 10);
               }
               
+              // 4. STATUS
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
             }
