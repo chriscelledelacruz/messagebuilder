@@ -117,6 +117,7 @@ function parseTaskCSV(buffer) {
 
 // Find Store Projects (e.g., "Store 1001")
 async function discoverProjectsByStoreIds(storeIds) {
+  console.log(`Discovering projects for ${storeIds.length} stores...`);
   const projectMap = {};
   let offset = 0; const limit = 100;
   while(true) {
@@ -125,9 +126,11 @@ async function discoverProjectsByStoreIds(storeIds) {
     
     res.data.forEach(inst => {
       const title = inst.config?.localization?.en_US?.title || "";
-      // Regex to find "Store {ID}" projects
-      const match = title.match(/^Store\s+(\w+)$/i);
+      // Regex to find "Store {ID}" projects - Made more flexible to catch "Store 1001", "Store #1001", etc.
+      const match = title.match(/^Store\s*#?\s*(\w+)$/i);
+      
       if(match && storeIds.includes(match[1])) {
+        console.log(`Found project for store ${match[1]}: ${inst.id}`);
         projectMap[match[1]] = inst.id;
       }
     });
@@ -135,6 +138,7 @@ async function discoverProjectsByStoreIds(storeIds) {
     if(res.data.length < limit) break;
     offset += limit;
   }
+  console.log(`Total projects found: ${Object.keys(projectMap).length}`);
   return projectMap;
 }
 
@@ -201,24 +205,27 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     const userIds = verifiedUsers.map(u => u.id); // Internal IDs for Channel Access
     const storeIds = verifiedUsers.map(u => u.csvId); // Store IDs for Task Lists
 
-    // Generate Metadata (Using Underscores)
+    console.log(`Processing ${userIds.length} users and ${storeIds.length} store IDs.`);
+
+    // Generate Metadata (Using Hyphens - Safe ID)
     const now = Date.now();
-    const safeDept = (department || 'General').replace(/[^a-zA-Z0-9]/g, ''); 
-    const metaExternalID = `adhoc_v3_${now}_${userIds.length}_${safeDept}`;
+    const metaExternalID = `adhoc-${now}`;
 
     // A. Create Channel
+    console.log("Creating News Channel...");
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
       config: {
         localization: { en_US: { title: title }, de_DE: { title: title } }
       },
-      accessorIDs: userIds // <--- CONFIRMED: This sets visibility to your target stores
+      accessorIDs: userIds
     });
     
     const channelId = channelRes.id;
 
     // B. Create Post
+    console.log("Creating News Post...");
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
@@ -232,11 +239,20 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     // C. Handle Tasks (Using storeIds from input)
     let taskCount = 0;
     if (req.file) {
+      console.log("Processing Task CSV...");
       const tasks = parseTaskCSV(req.file.buffer);
+      console.log(`Parsed ${tasks.length} tasks.`);
+      
       if (tasks.length > 0) {
         // 1. Find matching Store Projects
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
+        
+        console.log(`Found ${installationIds.length} target projects for tasks.`);
+
+        if (installationIds.length === 0) {
+            console.warn("WARNING: No matching Store Projects found. Tasks will NOT be created.");
+        }
         
         // 2. Chunk requests to create tasks safely
         const chunkedInsts = [];
@@ -262,7 +278,10 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
           }));
         }
         taskCount = tasks.length * installationIds.length;
+        console.log(`Total tasks created: ${taskCount}`);
       }
+    } else {
+        console.log("No Task CSV file uploaded.");
     }
 
     res.json({ success: true, channelId, postId: postRes.id, taskCount });
@@ -290,28 +309,25 @@ app.get("/api/items", async (req, res) => {
         const title = inst.config?.localization?.en_US?.title || "Untitled";
         const extID = inst.externalID || "";
 
-        // STRATEGY A: New V3 (Underscore)
-        if (extID.startsWith('adhoc_v3_')) {
-          const parts = extID.split('_');
+        // STRATEGY A: New "Safe" Format (adhoc-123456789)
+        if (extID.startsWith('adhoc-') && !extID.includes('|') && !extID.includes('v2')) {
           item = {
             channelId: inst.id,
             title: title,
-            department: parts[4] || parts[3] || "General",
-            userCount: parts[2] || "0",
-            createdAt: new Date(parseInt(parts[1])).toISOString(),
+            department: "General", 
+            userCount: inst.accessorIDs ? inst.accessorIDs.length : 0,
+            createdAt: inst.created || new Date().toISOString(),
             status: "Draft"
           };
         }
         // STRATEGY B: Legacy Support
-        else if (extID.startsWith('adhoc-v2-') || extID.startsWith('adhoc_v2|')) {
-           const separator = extID.includes('-') ? '-' : '|';
-           const parts = extID.split(separator);
+        else if (extID.startsWith('adhoc-v2') || extID.startsWith('adhoc_v2')) {
            item = {
              channelId: inst.id,
              title: title,
-             department: parts[3],
-             userCount: parts[2],
-             createdAt: new Date(parseInt(parts[1])).toISOString(),
+             department: "Legacy",
+             userCount: inst.accessorIDs ? inst.accessorIDs.length : 0,
+             createdAt: inst.created,
              status: "Draft"
            };
         }
@@ -334,6 +350,11 @@ app.get("/api/items", async (req, res) => {
             const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
+              // FETCH DEPARTMENT from the Teaser if it's our new format
+              if (item.department === "General" && p.contents?.en_US?.teaser) {
+                item.department = p.contents.en_US.teaser; 
+              }
+              
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
             }
