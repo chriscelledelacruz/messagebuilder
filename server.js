@@ -368,10 +368,10 @@ app.get("/api/items", async (req, res) => {
               } 
               // Fallback: Check 'kicker' (where you save it) OR 'teaser'
               else if (p.contents?.en_US?.kicker) {
-                  item.department = p.contents.en_US.kicker();
+                  item.department = p.contents.en_US.kicker.trim();
               }
               else if (p.contents?.en_US?.teaser) {
-                  item.department = p.contents.en_US.teaser();
+                  item.department = p.contents.en_US.teaser.trim();
               }
               
               
