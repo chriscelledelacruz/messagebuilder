@@ -316,7 +316,7 @@ app.get("/api/items", async (req, res) => {
             channelId: inst.id,
             title: title,
             department: "General", 
-            userCount: 0, // Fallback, will update from post content
+            userCount: 0, 
             createdAt: inst.created || new Date().toISOString(),
             status: "Draft"
           };
@@ -351,19 +351,25 @@ app.get("/api/items", async (req, res) => {
             const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
-              const content = p.contents?.en_US?.content || "";
+              let rawContent = p.contents?.en_US?.content || "";
+              
+              // --- FIX: TEXT-FIRST STRATEGY ---
+              // 1. Strip ALL HTML tags to get pure text.
+              // Example: "<p><strong>Category:</strong> HR</p>" -> "Category: HR"
+              const plainText = rawContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              
+              console.log(`[Item ${item.channelId}] Extracted Text: "${plainText}"`);
 
-              // --- FIX: Extract metadata directly from the HTML content ---
-              // 1. Extract Department from "Category:" HTML
-              const deptMatch = content.match(/Category:<\/strong>\s*(.*?)<\/p>/);
+              // 2. Extract Department using text matching
+              const deptMatch = plainText.match(/Category:\s*([^Targeted]*)/i);
               if (deptMatch && deptMatch[1]) {
-                 item.department = deptMatch[1];
+                 item.department = deptMatch[1].trim();
               } else if (p.contents?.en_US?.teaser) {
                  item.department = p.contents.en_US.teaser; 
               }
 
-              // 2. Extract User Count from "Targeted Stores:" HTML
-              const countMatch = content.match(/Targeted Stores:\s*(\d+)/);
+              // 3. Extract User Count
+              const countMatch = plainText.match(/Targeted Stores:\s*(\d+)/i);
               if (countMatch && countMatch[1]) {
                 item.userCount = parseInt(countMatch[1], 10);
               }
@@ -372,7 +378,7 @@ app.get("/api/items", async (req, res) => {
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
             }
-          } catch(e) {}
+          } catch(e) { console.error(e); }
           items.push(item);
         }
       }
@@ -384,6 +390,7 @@ app.get("/api/items", async (req, res) => {
     items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ items });
   } catch (err) {
+    console.error("List Error:", err);
     res.json({ items: [] });
   }
 });
