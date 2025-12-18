@@ -6,7 +6,11 @@ require("dotenv").config();
 const app = express();
 
 // Middleware
+// Increased limit for large JSON payloads (thousands of IDs)
 app.use(express.json({ limit: '50mb' })); 
+
+// Multer Setup: We only accept 'taskCsv' now. 
+// The Store list comes in the request body, not as a file.
 const upload = multer({ storage: multer.memoryStorage() });
 
 const STAFFBASE_BASE_URL = process.env.STAFFBASE_BASE_URL;
@@ -14,7 +18,7 @@ const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
 const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
 const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
 
-// --- API HELPER ---
+// --- API HELPER (With Retry Logic) ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function sb(method, path, body) {
@@ -32,6 +36,7 @@ async function sb(method, path, body) {
   while (retries > 0) {
     const res = await fetch(url, options);
     
+    // Handle Rate Limiting
     if (res.status === 429) {
       console.warn(`[API 429] Rate limit hit. Waiting 2s...`);
       await delay(2000);
@@ -45,13 +50,16 @@ async function sb(method, path, body) {
       throw new Error(`API ${res.status}: ${txt}`);
     }
     
+    // Handle Empty Responses (204)
     if (res.status === 204) return {};
     return res.json();
   }
-  throw new Error("API Timeout");
+  throw new Error("API Timeout after retries");
 }
 
 // --- LOGIC HELPERS ---
+
+// Bulk Fetch User Map (The "Phonebook" Strategy)
 async function getAllUsersMap() {
   const userMap = new Map(); 
   let offset = 0;
@@ -65,8 +73,10 @@ async function getAllUsersMap() {
       if (!res.data || res.data.length === 0) break;
 
       for (const user of res.data) {
+        // We look for the Store ID in the custom profile field
         const storeId = user.profile?.[HIDDEN_ATTRIBUTE_KEY];
         if (storeId) {
+          // Map Store ID -> User Object
           userMap.set(String(storeId), {
             id: user.id,
             csvId: String(storeId),
@@ -87,6 +97,7 @@ async function getAllUsersMap() {
   return userMap;
 }
 
+// Parse Task CSV (Buffer -> Array)
 function parseTaskCSV(buffer) {
   try {
     const text = buffer.toString("utf8");
@@ -104,36 +115,48 @@ function parseTaskCSV(buffer) {
   } catch (e) { return []; }
 }
 
+// Find Store Projects (e.g., "Store 1001")
 async function discoverProjectsByStoreIds(storeIds) {
+  console.log(`Discovering projects for ${storeIds.length} stores...`);
   const projectMap = {};
   let offset = 0; const limit = 100;
   while(true) {
     const res = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
     if(!res.data || res.data.length === 0) break;
+    
     res.data.forEach(inst => {
       const title = inst.config?.localization?.en_US?.title || "";
-      const match = title.match(/^Store\s+(\w+)$/i);
+      // Regex to find "Store {ID}" projects - Made more flexible to catch "Store 1001", "Store #1001", etc.
+      const match = title.match(/^Store\s*#?\s*(\w+)$/i);
+      
       if(match && storeIds.includes(match[1])) {
+        console.log(`Found project for store ${match[1]}: ${inst.id}`);
         projectMap[match[1]] = inst.id;
       }
     });
+    
     if(res.data.length < limit) break;
     offset += limit;
   }
+  console.log(`Total projects found: ${Object.keys(projectMap).length}`);
   return projectMap;
 }
 
 // --- ROUTES ---
 
+// 1. VERIFY USERS
 app.post("/api/verify-users", async (req, res) => {
   try {
     const { storeIds } = req.body;
     if (!storeIds || !Array.isArray(storeIds)) return res.status(400).json({ error: "Invalid storeIds" });
 
+    // 1. Load the "Phonebook"
     const userMap = await getAllUsersMap();
+    
     const foundUsers = [];
     const notFoundIds = [];
 
+    // 2. Instant Lookup
     for (const id of storeIds) {
       const user = userMap.get(String(id));
       if (user) foundUsers.push(user);
@@ -147,21 +170,24 @@ app.post("/api/verify-users", async (req, res) => {
   }
 });
 
+// 2. CREATE ADHOC POST & TASKS
+// Use upload.single('taskCsv') because the store list is now in req.body
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
     let { verifiedUsers, title, department } = req.body;
     
+    // Parse the JSON string sent by frontend
     if (typeof verifiedUsers === 'string') {
       try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
 
-    // Fallback: Resolve if frontend sent raw IDs
+    // Fallback: If verification wasn't passed, try to resolve raw IDs (Safety net)
     if (!verifiedUsers || verifiedUsers.length === 0) {
        let { storeIds } = req.body;
        if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
        
        if (storeIds && storeIds.length > 0) {
-         console.log("Resolving raw store IDs for creation...");
+         console.log("Fallback: Resolving raw store IDs...");
          const userMap = await getAllUsersMap();
          verifiedUsers = [];
          for(const id of storeIds) {
@@ -172,19 +198,21 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     }
 
     if (!verifiedUsers || verifiedUsers.length === 0) {
-      return res.status(400).json({ error: "No verified users found." });
+      return res.status(400).json({ error: "No verified users provided." });
     }
 
-    const userIds = verifiedUsers.map(u => u.id);
-    const storeIds = verifiedUsers.map(u => u.csvId);
+    // Extract necessary ID lists
+    const userIds = verifiedUsers.map(u => u.id); // Internal IDs for Channel Access
+    const storeIds = verifiedUsers.map(u => u.csvId); // Store IDs for Task Lists
 
-    // FIX: Use simple safe ID. Store metadata in the Post Content instead.
+    console.log(`Processing ${userIds.length} users and ${storeIds.length} store IDs.`);
+
+    // Generate Metadata (Using Hyphens - Safe ID)
     const now = Date.now();
-    const metaExternalID = `adhoc-${now}`; 
+    const metaExternalID = `adhoc-${now}`;
 
-    console.log("Generating Safe External ID:", metaExternalID);
-
-    // Create Channel
+    // A. Create Channel
+    console.log("Creating News Channel...");
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
@@ -196,8 +224,8 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     
     const channelId = channelRes.id;
 
-    // Create Post
-    // We store the Department in the Teaser so we can find it later
+    // B. Create Post
+    console.log("Creating News Post...");
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
@@ -208,21 +236,34 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       }
     });
 
-    // Handle Tasks
+    // C. Handle Tasks (Using storeIds from input)
     let taskCount = 0;
     if (req.file) {
+      console.log("Processing Task CSV...");
       const tasks = parseTaskCSV(req.file.buffer);
+      console.log(`Parsed ${tasks.length} tasks.`);
+      
       if (tasks.length > 0) {
+        // 1. Find matching Store Projects
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
         
+        console.log(`Found ${installationIds.length} target projects for tasks.`);
+
+        if (installationIds.length === 0) {
+            console.warn("WARNING: No matching Store Projects found. Tasks will NOT be created.");
+        }
+        
+        // 2. Chunk requests to create tasks safely
         const chunkedInsts = [];
         for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
 
         for (const chunk of chunkedInsts) {
           await Promise.all(chunk.map(async (instId) => {
             try {
+              // Create List
               const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
+              // Create Tasks
               for (const t of tasks) {
                 await sb("POST", `/tasks/${instId}/task`, {
                   taskListId: listRes.id,
@@ -233,11 +274,14 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
                   assigneeIds: [] 
                 });
               }
-            } catch(e) { console.error(`Task error ${instId}`, e.message); }
+            } catch(e) { console.error(`Task error for project ${instId}`, e.message); }
           }));
         }
         taskCount = tasks.length * installationIds.length;
+        console.log(`Total tasks created: ${taskCount}`);
       }
+    } else {
+        console.log("No Task CSV file uploaded.");
     }
 
     res.json({ success: true, channelId, postId: postRes.id, taskCount });
@@ -248,7 +292,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   }
 });
 
-// GET ITEMS (Updated to read safe format)
+// 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
   try {
     const items = [];
@@ -267,21 +311,17 @@ app.get("/api/items", async (req, res) => {
 
         // STRATEGY A: New "Safe" Format (adhoc-123456789)
         if (extID.startsWith('adhoc-') && !extID.includes('|') && !extID.includes('v2')) {
-          // It's the new clean format. 
-          // We get the date from 'created' and count from 'accessorIDs'
-          // We get 'department' from the post (fetched below)
           item = {
             channelId: inst.id,
             title: title,
-            department: "General", // Placeholder until post fetch
+            department: "General", 
             userCount: inst.accessorIDs ? inst.accessorIDs.length : 0,
             createdAt: inst.created || new Date().toISOString(),
             status: "Draft"
           };
         }
-        // STRATEGY B: Legacy Support (adhoc_v2... or [external]...)
-        else if (extID.startsWith('adhoc_v2') || extID.startsWith('adhoc-v2')) {
-           // Try to parse if possible, or fallback to safe defaults
+        // STRATEGY B: Legacy Support
+        else if (extID.startsWith('adhoc-v2') || extID.startsWith('adhoc_v2')) {
            item = {
              channelId: inst.id,
              title: title,
@@ -299,7 +339,7 @@ app.get("/api/items", async (req, res) => {
               title: match[4],
               department: match[3],
               userCount: match[1],
-              createdAt: inst.created,
+              createdAt: inst.created || new Date().toISOString(),
               status: "Draft"
             };
           }
@@ -334,6 +374,7 @@ app.get("/api/items", async (req, res) => {
   }
 });
 
+// 4. DELETE
 app.delete("/api/delete/:id", async (req, res) => {
   try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
   catch (err) { res.status(500).json({ error: err.message }); }
