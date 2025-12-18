@@ -275,7 +275,7 @@ app.post("/api/create", cpUpload, async (req, res) => {
 
     // B. Create Post (Embed Metadata reliably)
     // We add spaces inside the HTML to help the parser later
-    const contentHTML = `${title}<hr>${taskListHTML}`;
+    const contentHTML = `${title}<hr>${profileMergeHTML}${taskListHTML}`;
     const contentTeaser = `Category: ${department}; Targeted Stores: ${userIds.length}`
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
