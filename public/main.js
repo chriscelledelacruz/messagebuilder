@@ -225,9 +225,10 @@ function filterAndRenderItems() {
 
   filtered.forEach(item => {
     const div = document.createElement("div");
-    div.className = "item";
-    const editUrl = `https://app.staffbase.com/admin/plugin/news/${item.channelId}/posts`;
+    const safeCat = (item.department || "Uncategorized").replace(/\s+/g, '');
+    div.className = `item cat-${safeCat}`; 
     
+    const editUrl = `https://app.staffbase.com/admin/plugin/news/${item.channelId}/posts`;
     // Status Badge Logic
     let badgeClass = "tag-draft";
     if (item.status === "Published") badgeClass = "tag-published";
@@ -238,7 +239,10 @@ function filterAndRenderItems() {
         <div class="item-title" style="margin:0;"><strong>${item.title}</strong></div>
         <span class="status-tag ${badgeClass}">${item.status}</span>
       </div>
-      <div class="item-detail">Category: ${item.department} | Stores: ${item.userCount}</div>
+      <div class="item-detail">
+        Category: <span class="cat-badge cat-${safeCat}">${item.department || "Uncategorized"}</span> 
+        | Stores: ${item.userCount}
+      </div>
       <div class="item-detail">
         <a href="${editUrl}" target="_blank" class="post-link">Edit Post</a>
         <button class="btn-delete-post" data-id="${item.channelId}">Delete</button>
