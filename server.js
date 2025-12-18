@@ -314,37 +314,28 @@ app.get("/api/items", async (req, res) => {
     // FIX 1: Use 'createdAt' (standard API) and fallback to 'created' just in case
         const dateStr = inst.createdAt || inst.created || new Date().toISOString();
     
-        if (extID.startsWith('adhoc-') && !extID.includes('|') && !extID.includes('v2')) {
+// 1. DETERMINE ITEM TYPE & INITIAL METADATA
+        
+        // SIMPLIFIED: Catch anything starting with "adhoc" (v1, v2, etc.)
+        if (extID.startsWith('adhoc')) {
           item = {
             channelId: inst.id,
             title: title,
-            department: "General", 
+            department: "Uncategorized", // Default placeholder
             userCount: defaultUserCount,
-            createdAt: dateStr, // Used the fixed date
+            createdAt: dateStr,
             status: "Draft"
           };
         }
-        else if (extID.startsWith('adhoc-v2') || extID.startsWith('adhoc_v2')) {
-           item = {
-             channelId: inst.id,
-             title: title,
-             department: "Legacy",
-             userCount: defaultUserCount,
-             createdAt: dateStr, // FIX 2: Added the safe date here too
-             status: "Draft"
-           };
-        }
         else if (title.startsWith('[external]')) {
-          // Legacy external format
-          // FIX 3: Changed ([^ ]+) to (.*?) to capture multi-word departments like "Human Resources"
+          // Keep this! It handles your very old migrated data
           const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::(.*?) - (.+)$/);
-          
           if (match) {
             item = {
               channelId: inst.id,
               title: match[4],
               department: match[3],
-              userCount: parseInt(match[1], 10), 
+              userCount: parseInt(match[1], 10),
               createdAt: dateStr,
               status: "Draft"
             };
