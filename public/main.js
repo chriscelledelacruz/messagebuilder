@@ -1,10 +1,27 @@
-// ... existing top variables ...
 const form = document.getElementById("form");
 const list = document.getElementById("list");
 const status = document.getElementById("status");
-// ... keep existing file input logic ...
 
-// --- VERIFY STORES ---
+// File input elements
+const taskCsvInput = document.getElementById("taskCsv");
+const taskCsvFileName = document.getElementById("taskCsvFileName");
+
+// Update file name display
+if (taskCsvInput) {
+  taskCsvInput.addEventListener("change", () => {
+    taskCsvFileName.textContent = taskCsvInput.files.length > 0 ? taskCsvInput.files[0].name : "No file selected";
+  });
+}
+
+// --- SMART SEARCH LOGIC ---
+let validStores = [];
+let currentPage = 1;
+const ITEMS_PER_PAGE = 5;
+
+document.getElementById('verifyBtn').addEventListener('click', verifyStores);
+document.getElementById('prevPageBtn').addEventListener('click', () => changePage(-1));
+document.getElementById('nextPageBtn').addEventListener('click', () => changePage(1));
+
 async function verifyStores() {
   const rawInput = document.getElementById('storeInput').value;
   const resultsContainer = document.getElementById('resultsContainer');
@@ -18,19 +35,12 @@ async function verifyStores() {
   status.className = '';
 
   if (!rawInput.trim()) {
-    status.textContent = "Please paste Store IDs first.";
+    status.textContent = "Please enter Store IDs.";
     status.className = "status-error";
     return;
   }
 
-  // Optimize: Clean input before sending
-  const searchIds = rawInput.split(/[\s,]+/).filter(Boolean);
-  const uniqueIds = [...new Set(searchIds)];
-
-  if (uniqueIds.length > 5000) {
-     if(!confirm(`You are verifying ${uniqueIds.length} stores. This might take a moment. Continue?`)) return;
-  }
-
+  const uniqueIds = [...new Set(rawInput.split(/[\s,]+/).filter(Boolean))];
   btn.textContent = "Verifying...";
   btn.disabled = true;
 
@@ -40,33 +50,23 @@ async function verifyStores() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ storeIds: uniqueIds })
     });
-
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Request failed");
+    if (!res.ok) throw new Error(data.error);
 
     validStores = data.foundUsers;
-    
-    // UI Feedback
     if (validStores.length > 0) {
       resultsContainer.style.display = 'block';
       currentPage = 1;
       renderStoreTable();
       countMsg.textContent = `✓ Found ${validStores.length} valid stores.`;
-      
-      if (data.notFoundIds.length > 0) {
-        // Show partial error
-        status.innerHTML = `⚠️ <strong>Warning:</strong> ${data.notFoundIds.length} IDs could not be found.<br>Invalid IDs: ${data.notFoundIds.slice(0, 10).join(', ')}${data.notFoundIds.length > 10 ? '...' : ''}`;
-        status.className = "status-error";
-      } else {
-        status.textContent = "✓ All stores verified successfully.";
-        status.className = "status-success";
-      }
+      status.textContent = data.notFoundIds.length > 0 
+        ? `⚠️ Warning: ${data.notFoundIds.length} IDs not found.` 
+        : "✓ All verified.";
+      status.className = data.notFoundIds.length > 0 ? "status-error" : "status-success";
     } else {
-      // Show total error
-      status.innerHTML = `✗ <strong>No valid stores found.</strong><br>Checked ${uniqueIds.length} IDs.`;
+      status.textContent = "✗ No valid stores found.";
       status.className = "status-error";
     }
-
   } catch (err) {
     status.textContent = "Error: " + err.message;
     status.className = "status-error";
@@ -76,6 +76,114 @@ async function verifyStores() {
   }
 }
 
-// ... keep existing renderStoreTable, form submit, and loadItems functions ...
-// Ensure you copy the 'loadItems' logic from the previous turn if needed, 
-// or keep your current one if it works.
+function renderStoreTable() {
+  const tbody = document.getElementById('storeTableBody');
+  tbody.innerHTML = '';
+  const start = (currentPage - 1) * ITEMS_PER_PAGE;
+  const end = start + ITEMS_PER_PAGE;
+  
+  validStores.slice(start, end).forEach(store => {
+    tbody.innerHTML += `<tr><td><code>${store.csvId}</code></td><td>${store.name}</td><td style="color:var(--se-green);font-weight:bold;">Active</td></tr>`;
+  });
+  
+  const maxPage = Math.ceil(validStores.length / ITEMS_PER_PAGE) || 1;
+  document.getElementById('pageInfo').innerText = `Page ${currentPage} of ${maxPage}`;
+  document.getElementById('prevPageBtn').disabled = currentPage === 1;
+  document.getElementById('nextPageBtn').disabled = currentPage === maxPage;
+}
+
+function changePage(dir) {
+  const maxPage = Math.ceil(validStores.length / ITEMS_PER_PAGE);
+  if (dir === -1 && currentPage > 1) currentPage--;
+  if (dir === 1 && currentPage < maxPage) currentPage++;
+  renderStoreTable();
+}
+
+// --- FORM SUBMIT ---
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (validStores.length === 0) {
+    status.textContent = "Please verify stores first.";
+    status.className = "status-error";
+    return;
+  }
+
+  status.textContent = "Creating post and tasks...";
+  status.className = "status-processing";
+
+  try {
+    const formData = new FormData();
+    formData.append("storeIds", JSON.stringify(validStores.map(s => s.csvId)));
+    formData.append("title", document.getElementById("title").value.trim());
+    formData.append("department", document.getElementById("department").value);
+    formData.append("notify", document.getElementById("notify").checked);
+    
+    if (taskCsvInput.files[0]) formData.append("taskCsv", taskCsvInput.files[0]);
+
+    const res = await fetch("/api/create", { method: "POST", body: formData });
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error);
+
+    status.textContent = "✓ Success! Reloading...";
+    status.className = "status-success";
+    setTimeout(() => location.reload(), 1500);
+  } catch (err) {
+    status.textContent = "✗ Error: " + err.message;
+    status.className = "status-error";
+  }
+});
+
+// --- PAST SUBMISSIONS ---
+async function loadItems() {
+  try {
+    const res = await fetch("/api/items");
+    const data = await res.json();
+    const listDiv = document.getElementById("list");
+    listDiv.innerHTML = "";
+
+    if (!data.items || data.items.length === 0) {
+      listDiv.innerHTML = '<div style="text-align:center;color:#999;padding:20px;">No past submissions found.</div>';
+      return;
+    }
+
+    data.items.forEach(item => {
+      let badgeClass = "tag-draft";
+      if(item.status === "Published") badgeClass = "tag-published";
+      if(item.status === "Scheduled") badgeClass = "tag-scheduled";
+
+      const editUrl = `https://app.staffbase.com/admin/plugin/news/${item.channelId}/posts`;
+
+      const el = document.createElement("div");
+      el.className = "item";
+      el.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+          <div class="item-title" style="margin:0;"><strong>${item.title}</strong></div>
+          <span class="status-tag ${badgeClass}">${item.status}</span>
+        </div>
+        <div class="item-detail" style="margin-top:5px;">
+          ${item.department} &bull; ${item.userCount} Stores
+        </div>
+        <div class="item-detail">
+          Channel ID: <code>${item.channelId}</code>
+          <a href="${editUrl}" target="_blank" class="post-link">Edit Post</a>
+          <button class="btn-delete-post" data-id="${item.channelId}">Delete</button>
+        </div>
+        <div class="item-timestamp">Created: ${new Date(item.createdAt).toLocaleString()}</div>
+      `;
+      listDiv.appendChild(el);
+    });
+
+    document.querySelectorAll(".btn-delete-post").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        if(!confirm("Delete this channel?")) return;
+        await fetch(`/api/delete/${e.target.dataset.id}`, { method: "DELETE" });
+        location.reload();
+      });
+    });
+
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", loadItems);
