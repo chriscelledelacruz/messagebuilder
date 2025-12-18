@@ -127,7 +127,9 @@ async function discoverProjectsByStoreIds(storeIds) {
     res.data.forEach(inst => {
       const title = inst.config?.localization?.en_US?.title || "";
       // Regex to find "Store {ID}" projects - Made more flexible to catch "Store 1001", "Store #1001", etc.
-      const match = title.match(/^Store\s*#?\s*(\w+)$/i);
+      // Removes '$' so trailing text/spaces are ignored
+      // Removes '^' so it can find "Store" even if there is a space before it
+      const match = title.match(/Store\s*#?\s*(\w+)/i);    
       
       if(match && storeIds.includes(match[1])) {
         console.log(`Found project for store ${match[1]}: ${inst.id}`);
