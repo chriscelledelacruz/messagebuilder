@@ -320,3 +320,50 @@ button[type="submit"]:hover {
 }
 .btn-confirm { background: var(--se-green); color: white; padding: 10px 20px; border:none; border-radius:4px; cursor:pointer; }
 .btn-cancel { background: #666; color: white; padding: 10px 20px; border:none; border-radius:4px; cursor:pointer; }
+
+/* --- Category Colors --- */
+/* We use CSS variables for easy tweaking */
+:root {
+  --cat-merch: #9b59b6; /* Purple */
+  --cat-mkt:   #F58220; /* 7-Eleven Orange */
+  --cat-audit: #e74c3c; /* Red */
+  --cat-ops:   #3498db; /* Blue */
+  --cat-hr:    #e67e22; /* Carrot/Pinkish */
+  --cat-it:    #1abc9c; /* Teal */
+  --cat-none:  #95a5a6; /* Gray */
+}
+
+/* The Legend Bar */
+.legend-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  background: white;
+  padding: 15px 20px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-size: 0.85rem;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  align-items: center;
+}
+.legend-label { font-weight: bold; color: #555; margin-right: 5px; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.color-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+
+/* Apply colors to the "Left Border" of the list item */
+.item.cat-Merchandising { border-left-color: var(--cat-merch); }
+.item.cat-Marketing     { border-left-color: var(--cat-mkt); }
+.item.cat-Audit         { border-left-color: var(--cat-audit); }
+.item.cat-Operations    { border-left-color: var(--cat-ops); }
+.item.cat-HR            { border-left-color: var(--cat-hr); }
+.item.cat-IT            { border-left-color: var(--cat-it); }
+.item.cat-Uncategorized { border-left-color: var(--cat-none); }
+
+/* Apply colors to the Category Text inside the item */
+.cat-badge { font-weight: 700; }
+.cat-Merchandising { color: var(--cat-merch); }
+.cat-Marketing     { color: var(--cat-mkt); }
+.cat-Audit         { color: var(--cat-audit); }
+.cat-Operations    { color: var(--cat-ops); }
+.cat-HR            { color: var(--cat-hr); }
+.cat-IT            { color: var(--cat-it); }
