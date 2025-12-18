@@ -6,7 +6,7 @@ require("dotenv").config();
 const app = express();
 
 // Middleware
-app.use(express.json({ limit: '10mb' })); 
+app.use(express.json({ limit: '50mb' })); 
 const upload = multer({ storage: multer.memoryStorage() });
 
 const STAFFBASE_BASE_URL = process.env.STAFFBASE_BASE_URL;
@@ -14,7 +14,7 @@ const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
 const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
 const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
 
-// --- API HELPER ---
+// --- API HELPER (With Robust Rate Limiting) ---
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function sb(method, path, body) {
@@ -28,58 +28,74 @@ async function sb(method, path, body) {
   };
   if (body) options.body = JSON.stringify(body);
 
-  let retries = 3;
+  let retries = 5;
   while (retries > 0) {
     const res = await fetch(url, options);
+    
     if (res.status === 429) {
-      console.warn(`[API 429] Rate limit hit on ${path}, retrying...`);
-      await delay(1000);
+      console.warn(`[API 429] Too many requests. Waiting 2s...`);
+      await delay(2000);
       retries--;
       continue;
     }
+
     if (!res.ok) {
       const txt = await res.text();
       console.error(`[API Error] ${method} ${path}: ${res.status} - ${txt}`); 
       throw new Error(`API ${res.status}: ${txt}`);
     }
+    
     if (res.status === 204) return {};
     return res.json();
   }
-  throw new Error("API Timeout");
+  throw new Error("API Timeout after multiple retries");
 }
 
-// --- LOGIC HELPERS ---
-async function batchVerifyUsers(storeIds) {
-  const foundUsers = [];
-  const notFoundIds = [];
-  const CONCURRENCY = 5; 
+// --- OPTIMIZED LOOKUP: FETCH ALL & MAP ---
+// This is the only way to search by Custom Attributes efficiently.
+// It fetches all users (13k ≈ 130 pages) and builds a map.
+async function getAllUsersMap() {
+  const userMap = new Map(); // Key: StoreID, Value: UserObject
+  let offset = 0;
+  const limit = 100;
   
-  const checkId = async (id) => {
+  console.log("Fetching full user directory...");
+  
+  while (true) {
     try {
-      const res = await sb("GET", `/users?externalID=${encodeURIComponent(id)}`);
-      if (res.data && res.data.length > 0) {
-        // Strict match on externalID (String comparison)
-        const user = res.data.find(u => String(u.externalID) === String(id));
-        if (user) {
-          foundUsers.push({ id: user.id, csvId: id, name: `${user.firstName || ''} ${user.lastName || ''}`.trim() });
-        } else {
-          notFoundIds.push(id);
-        }
-      } else {
-        notFoundIds.push(id);
-      }
-    } catch (err) {
-      notFoundIds.push(id);
-    }
-  };
+      const res = await sb("GET", `/users?limit=${limit}&offset=${offset}`);
+      if (!res.data || res.data.length === 0) break;
 
-  for (let i = 0; i < storeIds.length; i += CONCURRENCY) {
-    const chunk = storeIds.slice(i, i + CONCURRENCY);
-    await Promise.all(chunk.map(id => checkId(id)));
+      for (const user of res.data) {
+        // key is the Value inside the Custom Attribute (e.g. "51362")
+        // If HIDDEN_ATTRIBUTE_KEY is not set, it might fall back to something else, so ensure .env is correct.
+        const storeId = user.profile?.[HIDDEN_ATTRIBUTE_KEY];
+        if (storeId) {
+          userMap.set(String(storeId), {
+            id: user.id,
+            csvId: String(storeId),
+            name: `${user.firstName || ''} ${user.lastName || ''}`.trim()
+          });
+        }
+      }
+
+      if (res.data.length < limit) break;
+      offset += limit;
+      
+      // Small safety delay to be nice to the API
+      if (offset % 1000 === 0) await delay(200); 
+
+    } catch (e) {
+      console.error("Error fetching page:", e.message);
+      break;
+    }
   }
-  return { foundUsers, notFoundIds };
+  
+  console.log(`Directory loaded. Found ${userMap.size} users with store IDs.`);
+  return userMap;
 }
 
+// --- HELPERS ---
 function parseTaskCSV(buffer) {
   try {
     const text = buffer.toString("utf8");
@@ -118,39 +134,74 @@ async function discoverProjectsByStoreIds(storeIds) {
 
 // --- ROUTES ---
 
+// 1. VERIFY USERS (Now uses the Bulk Map strategy)
 app.post("/api/verify-users", async (req, res) => {
   try {
     const { storeIds } = req.body;
     if (!storeIds || !Array.isArray(storeIds)) return res.status(400).json({ error: "Invalid storeIds" });
-    const result = await batchVerifyUsers(storeIds);
-    res.json(result);
+
+    // 1. Load the "Phonebook"
+    const userMap = await getAllUsersMap();
+    
+    const foundUsers = [];
+    const notFoundIds = [];
+
+    // 2. Look up every ID in the phonebook (Instant)
+    for (const id of storeIds) {
+      const user = userMap.get(String(id));
+      if (user) {
+        foundUsers.push(user);
+      } else {
+        notFoundIds.push(id);
+      }
+    }
+
+    res.json({ foundUsers, notFoundIds });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// UPDATED CREATE ENDPOINT
+// 2. CREATE POST
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
     let { verifiedUsers, title, department } = req.body;
     
-    // Parse the JSON string sent from frontend
+    // Parse verifiedUsers from string if needed
     if (typeof verifiedUsers === 'string') {
       try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
 
+    // Fallback: If verifying stores failed or wasn't done, we need to map them now.
+    // This handles the "No valid users found" error if the frontend didn't pass the object correctly.
     if (!verifiedUsers || verifiedUsers.length === 0) {
-      return res.status(400).json({ error: "No verified users provided." });
+       // If client sent raw storeIds instead of verified objects, try to resolve them
+       let { storeIds } = req.body;
+       if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
+       
+       if (storeIds && storeIds.length > 0) {
+         console.log("Resolving raw store IDs for creation...");
+         const userMap = await getAllUsersMap();
+         verifiedUsers = [];
+         for(const id of storeIds) {
+           const u = userMap.get(String(id));
+           if(u) verifiedUsers.push(u);
+         }
+       }
     }
 
-    // 1. Extract IDs directly (Skip re-verification!)
-    const userIds = verifiedUsers.map(u => u.id); // Internal Staffbase IDs
-    const storeIds = verifiedUsers.map(u => u.csvId); // External Store IDs (for tasks)
+    if (!verifiedUsers || verifiedUsers.length === 0) {
+      return res.status(400).json({ error: "No verified users found. Please verify stores first." });
+    }
 
-    // 2. Generate Metadata
+    // 1. Extract IDs
+    const userIds = verifiedUsers.map(u => u.id); // Internal IDs
+    const storeIds = verifiedUsers.map(u => u.csvId); // Store IDs
+
+    // 2. Metadata (Using Hyphens - Safe)
     const now = Date.now();
     const safeDept = (department || 'General').replace(/[^a-zA-Z0-9]/g, ''); 
-    // Format: adhoc-v2-{timestamp}-{count}-{department}
     const metaExternalID = `adhoc-v2-${now}-${userIds.length}-${safeDept}`;
 
     // 3. Create Channel
@@ -184,6 +235,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
         
+        // Chunk requests
         const chunkedInsts = [];
         for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
 
@@ -216,7 +268,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   }
 });
 
-// 3. GET ITEMS (Hybrid: Supports New Hyphen V2 + Legacy)
+// 3. GET ITEMS
 app.get("/api/items", async (req, res) => {
   try {
     const items = [];
