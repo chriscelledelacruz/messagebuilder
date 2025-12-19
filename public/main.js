@@ -144,6 +144,13 @@ form.addEventListener("submit", async (e) => {
   const title = document.getElementById("title").value.trim();
   const department = document.getElementById("department").value;
   const notify = document.getElementById("notify").checked;
+  const formData = new FormData();
+  const storeIds = validStores.map(s => s.csvId);
+    
+    formData.append("storeIds", JSON.stringify(storeIds));
+    formData.append("title", title);
+    formData.append("department", department);
+    formData.append("notify", notify);
 
   if (validStores.length === 0) {
     status.textContent = "Error: Please verify at least one valid store before creating a post.";
@@ -165,6 +172,12 @@ form.addEventListener("submit", async (e) => {
     
     if (taskCsvFile) {
       formData.append("taskCsv", taskCsvFile);
+    }
+
+    // --- NEW: Append Profile CSV ---
+    const profileCsvFile = document.getElementById("profileCsv").files[0];
+    if (profileCsvFile) {
+      formData.append("profileCsv", profileCsvFile);
     }
 
     const res = await fetch("/api/create", {
