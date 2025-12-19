@@ -252,63 +252,125 @@ app.post("/api/create", cpUpload, async (req, res) => {
     }
 
     // 2. STANDARD POST CREATION (Existing Logic)
-    const userMap = await getAllUsersMap();
-    const userIds = [];
-    
-    for (const id of targetStoreIds) {
-      const u = userMap.get(String(id));
-      if (u) userIds.push(u.id);
-    }
-    
-    // ... (Task parsing logic remains the same, assuming req.files['taskCsv']) ...
-    let taskListHTML = "";
-    if (req.files && req.files['taskCsv']) {
-       const tasks = parseCSV(req.files['taskCsv'][0].buffer).rows; // Use new generic parser
-       // ... build task HTML ...
-       if (tasks.length > 0) {
-         taskListHTML = "<h3>Action Items</h3><ul>";
-         tasks.forEach(t => taskListHTML += `<li>${t.Title || t.title}</li>`); // Adjust key based on CSV
-         taskListHTML += "</ul>";
-       }
-    }
+// 3. GET PAST SUBMISSIONS
+app.get("/api/items", async (req, res) => {
+  // AGGRESSIVE CACHE BUSTING
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  
+  try {
+    const items = [];
+    let offset = 0; const limit = 100;
 
-    // A. Create Channel
-    const now = Date.now();
-    const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
-      pluginID: "news",
-      externalID: `adhoc-${now}`, 
-      config: { localization: { en_US: { title: title }, de_DE: { title: title } } },
-      accessorIDs: userIds
-    });
+    while(true) {
+      const result = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
+      
+      // FIX: Handle 204 No Content (empty result) gracefully
+      if (!result.data || result.data.length === 0) break;
+
+      for (const inst of result.data) {
+        if (inst.pluginID !== 'news') continue;
+
+        let item = null;
+        const title = inst.config?.localization?.en_US?.title || "Untitled";
+        const extID = inst.externalID || "";
+        // Use accessorIDs as a fallback if extraction fails
+        const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
+        const dateStr = inst.createdAt || inst.created || new Date().toISOString();
     
-    // B. Create Post (Include Field Merge Table)
-    const contentHTML = `${fieldMergeTable} ${title}<hr>${taskListHTML}`;
-    
-    const postRes = await sb("POST", `/channels/${channelRes.id}/posts`, {
-      contents: { 
-        en_US: { 
-          title: title, 
-          content: contentHTML,
-          teaser: `Category: ${department}; Targeted Stores: ${userIds.length}`,
-          kicker: department 
-        } 
+        // 1. DETERMINE ITEM TYPE & INITIAL METADATA
+        if (extID.startsWith('adhoc')) {
+          item = {
+            channelId: inst.id,
+            title: title,
+            department: "Uncategorized", 
+            userCount: defaultUserCount,
+            createdAt: dateStr,
+            status: "Draft"
+          };
+        }
+        else if (title.startsWith('[external]')) {
+          // Legacy support
+          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::(.*?) - (.+)$/);
+          if (match) {
+            item = {
+              channelId: inst.id,
+              title: match[4],
+              department: match[3],
+              userCount: parseInt(match[1], 10),
+              createdAt: dateStr,
+              status: "Draft"
+            };
+          }
+        }
+
+        if (item) {
+          try {
+            // Fetch the latest post to get accurate status/details
+            const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
+            
+            if (posts.data && posts.data.length > 0) {
+              const p = posts.data[0];
+              const teaserText = p.contents?.en_US?.teaser || "";
+              const kickerText = p.contents?.en_US?.kicker || "";
+              const rawContent = p.contents?.en_US?.content || "";
+              const plainBodyText = cleanText(rawContent);
+
+              // 2. EXTRACT DEPARTMENT
+              let deptMatch = teaserText.match(/(?:Category|Department):\s*([^;]+)/i);
+              if (deptMatch && deptMatch[1]) {
+                  item.department = deptMatch[1].trim(); 
+              } else if (kickerText) {
+                  item.department = kickerText.trim();
+              } else {
+                  deptMatch = plainBodyText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
+                  if (deptMatch && deptMatch[1]) item.department = deptMatch[1].trim();
+              }
+
+              // 3. EXTRACT USER COUNT
+              let countMatch = teaserText.match(/Targeted Stores:\s*(\d+)/i);
+              if (countMatch && countMatch[1]) {
+                  item.userCount = parseInt(countMatch[1], 10);
+              } else {
+                  countMatch = plainBodyText.match(/Targeted Stores:\s*(\d+)/i);
+                  if (countMatch && countMatch[1]) item.userCount = parseInt(countMatch[1], 10);
+              }
+              
+              // 4. STATUS
+              if (p.published) item.status = "Published";
+              else if (p.planned) item.status = "Scheduled";
+            }
+          } catch(e) { 
+             // If fetching posts fails (e.g. 404 or 204), keep defaults
+             console.warn(`Could not fetch posts for ${item.channelId}`, e.message);
+          }
+          items.push(item);
+        }
       }
-    });
 
-    res.json({ success: true, channelId: channelRes.id });
+      if (result.data.length < limit) break;
+      offset += limit;
+    }
 
+    items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ items });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
+    console.error("List Error:", err);
+    res.json({ items: [] });
   }
 });
 
-// ... (Rest of routes: GET /api/items, DELETE, app.listen) ...
-// (Copy them from your previous file, they don't need changes)
+// 4. DELETE
+app.delete("/api/delete/:id", async (req, res) => {
+  try { 
+      await sb("DELETE", `/installations/${req.params.id}`); 
+      res.json({ success: true }); 
+  } catch (err) { 
+      res.status(500).json({ error: err.message }); 
+  }
+});
 
-// Just for completeness of the snippet:
-app.get("/api/items", async (req, res) => { /* ... existing code ... */ res.json({items:[]}); });
-app.delete("/api/delete/:id", async (req, res) => { /* ... existing code ... */ res.json({success:true}); });
 app.use(express.static(path.join(__dirname, "public")));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running`));
+app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
