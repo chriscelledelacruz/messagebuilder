@@ -60,30 +60,38 @@ async function sb(method, path, body) {
 }
 
 // --- NEW: API Helper for File Uploads (Native Node.js Version) ---
+// --- UPDATED: Safe Upload Helper for Vercel (Fixes JSON Error) ---
 async function sbUpload(path, buffer, filename) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
-  
-  // Use Native FormData (Built-in to Node 18+)
-  // This avoids "multipart EOF" and "duplex" errors from external libraries
   const form = new FormData();
-  const blob = new Blob([buffer], { type: 'text/csv' });
-  form.append('file', blob, filename);
+  form.append('file', buffer, { filename: filename, contentType: 'text/csv' });
 
   const options = {
     method: 'POST',
     headers: {
-      "Authorization": `Basic ${STAFFBASE_TOKEN}`
-      // NOTE: Do NOT set Content-Type manually here; fetch sets it with the boundary automatically
+      "Authorization": `Basic ${STAFFBASE_TOKEN}`,
+      ...form.getHeaders() // Correctly sets boundary
     },
-    body: form
+    body: form,
+    duplex: 'half' // Prevents "EOF" errors
   };
 
   const res = await fetch(url, options);
+
+  // 1. Handle "204 No Content" (Success but empty)
+  if (res.status === 204) {
+    return { id: null }; // Return dummy object if API sends nothing
+  }
+
+  // 2. Handle Errors
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`Upload Failed ${res.status}: ${txt}`);
   }
-  return res.json();
+
+  // 3. Safe JSON Parse (in case 200/201 has empty body)
+  const text = await res.text();
+  return text ? JSON.parse(text) : {}; 
 }
 
 // --- CSV PARSER ---
