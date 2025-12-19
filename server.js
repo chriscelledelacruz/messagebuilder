@@ -5,7 +5,7 @@ require("dotenv").config();
 
 const app = express();
 
-// --- FIX 1: DISABLE ETAGS & CACHING TO PREVENT 304 ERRORS ---
+// --- FIX 1: DISABLE ETAGS & CACHING ---
 app.set('etag', false);
 app.disable('view cache');
 
@@ -22,14 +22,15 @@ const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- API HELPER ---
-async function sb(method, path, body) {
+// --- API HELPER (UPDATED to support custom headers) ---
+async function sb(method, path, body, customHeaders = {}) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const options = {
     method,
     headers: {
       "Authorization": `Basic ${STAFFBASE_TOKEN}`, 
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...customHeaders // Merge in any custom headers
     }
   };
   if (body) options.body = JSON.stringify(body);
@@ -56,15 +57,41 @@ async function sb(method, path, body) {
 
 // --- LOGIC HELPERS ---
 
-// Helper to clean HTML entities which break Regex
 function cleanText(text) {
   if (!text) return "";
   return text
-    .replace(/&nbsp;/gi, ' ')  // Replace non-breaking space
+    .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
-    .replace(/<[^>]+>/g, ' ')  // Strip HTML tags
-    .replace(/\s+/g, ' ')      // Collapse multiple spaces
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
+}
+
+// --- NEW: FETCH OPS GROUP MEMBERS DYNAMICALLY ---
+async function getOpsGroupMembers() {
+  const OPS_GROUP_ID = "692a1bc3f912873d71f98e39";
+  try {
+    console.log(`[OPS] Fetching members for group: ${OPS_GROUP_ID}`);
+    
+    // SCIM Filter: groups eq "ID"
+    const filter = encodeURIComponent(`groups eq "${OPS_GROUP_ID}"`);
+    
+    // Staffbase Search often requires a specific Accept header
+    const headers = {
+        "Accept": "application/vnd.staffbase.accessors.users-search.v1+json"
+    };
+
+    const res = await sb("GET", `/users/search?filter=${filter}`, null, headers);
+    
+    if (res.data) {
+        console.log(`[OPS] Found ${res.data.length} Ops members.`);
+        return res.data;
+    }
+    return [];
+  } catch (e) {
+    console.warn("[OPS] Failed to fetch Ops members:", e.message);
+    return []; // Fail safe: return empty list so the rest of the process continues
+  }
 }
 
 async function getAllUsersMap() {
@@ -163,7 +190,6 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
     let { verifiedUsers, title, department } = req.body;
 
-    // --- FIX 2: Prevent "undefined" Department ---
     if (!department || department === 'undefined' || department.trim() === '') {
         department = "Uncategorized";
     }
@@ -172,7 +198,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
 
-    // Fallback logic if verifying in frontend failed
+    // Fallback logic
     if (!verifiedUsers || verifiedUsers.length === 0) {
        let { storeIds } = req.body;
        if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
@@ -192,25 +218,31 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       return res.status(400).json({ error: "No verified users provided." });
     }
 
-    const userIds = verifiedUsers.map(u => u.id);
+    const storeUserIds = verifiedUsers.map(u => u.id);
     const storeIds = verifiedUsers.map(u => u.csvId);
 
-    console.log(`[CREATE] Final: ${userIds.length} users. Dept: "${department}"`);
+    // --- UPDATE START: DYNAMICALLY FETCH OPS USERS ---
+    const opsUsers = await getOpsGroupMembers();
+    const opsUserIds = opsUsers.map(u => u.id);
+    
+    // Combine Store Users + Ops Users (Use Set to prevent duplicates)
+    const allAccessorIDs = [...new Set([...storeUserIds, ...opsUserIds])];
+    
+    console.log(`[CREATE] Visibility: ${storeUserIds.length} Stores + ${opsUserIds.length} Ops Members = ${allAccessorIDs.length} Total`);
+    // --- UPDATE END ---
 
     const now = Date.now();
     const metaExternalID = `adhoc-${now}`;
 
-    // --- NEW SECTION START: Parse Tasks Early ---
+    // Tasks parsing
     let tasks = [];
     let taskListHTML = "";
     
     if (req.file) {
       tasks = parseTaskCSV(req.file.buffer);
-      
       if (tasks.length > 0) {
         taskListHTML = "<h3>Action Items</h3><ul>";
         tasks.forEach(t => {
-          // Format date if it exists
           let dateDisplay = "";
           if (t.dueDate) {
              const d = new Date(t.dueDate);
@@ -221,35 +253,22 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
         taskListHTML += "</ul>";
       }
     }
-    // --- NEW SECTION END ---
-
-    // --- UPDATE START: ADD OPS GROUP VISIBILITY ---
-    const OPS_GROUP_ID = "692a1bc3f912873d71f98e39";
-    
-    // Combine targeted users with the Ops Group ID
-    const allAccessorIDs = [...userIds, OPS_GROUP_ID];
-    // --- UPDATE END ---
 
     // A. Create Channel
-      const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
+    const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
       config: {
         localization: { en_US: { title: title }, de_DE: { title: title } }
       },
-      // CHANGED: Use an object structure to explicitly separate Users and Groups
-      accessorIDs: {
-        userIds: userIds,
-        groupIds: [OPS_GROUP_ID]
-      }
+      accessorIDs: allAccessorIDs // Passing valid USER IDs only
     });
     
     const channelId = channelRes.id;
 
-    // B. Create Post (Embed Metadata reliably)
-    // We add spaces inside the HTML to help the parser later
+    // B. Create Post
     const contentHTML = `${title}<hr>${taskListHTML}`;
-    const contentTeaser = `Category: ${department}; Targeted Stores: ${userIds.length}`
+    const contentTeaser = `Category: ${department}; Targeted Stores: ${storeUserIds.length}`
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
@@ -302,7 +321,6 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
 
 // 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
-  // --- FIX 3: AGGRESSIVE CACHE BUSTING ---
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
@@ -322,27 +340,20 @@ app.get("/api/items", async (req, res) => {
         const title = inst.config?.localization?.en_US?.title || "Untitled";
         const extID = inst.externalID || "";
         
-        // Use accessorIDs as a fallback if extraction fails
        const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
+       const dateStr = inst.createdAt || inst.created || new Date().toISOString();
     
-    // FIX 1: Use 'createdAt' (standard API) and fallback to 'created' just in case
-        const dateStr = inst.createdAt || inst.created || new Date().toISOString();
-    
-// 1. DETERMINE ITEM TYPE & INITIAL METADATA
-        
-        // SIMPLIFIED: Catch anything starting with "adhoc" (v1, v2, etc.)
         if (extID.startsWith('adhoc')) {
           item = {
             channelId: inst.id,
             title: title,
-            department: "Uncategorized", // Default placeholder
+            department: "Uncategorized", 
             userCount: defaultUserCount,
             createdAt: dateStr,
             status: "Draft"
           };
         }
         else if (title.startsWith('[external]')) {
-          // Keep this! It handles your very old migrated data
           const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::(.*?) - (.+)$/);
           if (match) {
             item = {
@@ -362,43 +373,34 @@ app.get("/api/items", async (req, res) => {
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
               
-              // 1. Get the source text (Prioritize Teaser)
               const teaserText = p.contents?.en_US?.teaser || "";
               const kickerText = p.contents?.en_US?.kicker || "";
               const rawContent = p.contents?.en_US?.content || "";
               const plainBodyText = cleanText(rawContent);
 
-              // 2. EXTRACT DEPARTMENT
-              // First try the Teaser
               let deptMatch = teaserText.match(/(?:Category|Department):\s*([^;]+)/i);
               
               if (deptMatch && deptMatch[1]) {
                   item.department = deptMatch[1].trim(); 
               } 
-              // Fallback: Check Kicker
               else if (kickerText) {
                   item.department = kickerText.trim();
               }
-              // Fallback: Check Body (Legacy support)
               else {
                   deptMatch = plainBodyText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
                   if (deptMatch && deptMatch[1]) item.department = deptMatch[1].trim();
               }
 
-              // 3. EXTRACT USER COUNT
-              // First try the Teaser
               let countMatch = teaserText.match(/Targeted Stores:\s*(\d+)/i);
               
               if (countMatch && countMatch[1]) {
                   item.userCount = parseInt(countMatch[1], 10);
               } 
-              // Fallback: Check Body (Legacy support)
               else {
                   countMatch = plainBodyText.match(/Targeted Stores:\s*(\d+)/i);
                   if (countMatch && countMatch[1]) item.userCount = parseInt(countMatch[1], 10);
               }
               
-              // 4. STATUS
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
             }
@@ -418,6 +420,7 @@ app.get("/api/items", async (req, res) => {
     res.json({ items: [] });
   }
 });
+
 // 4. DELETE
 app.delete("/api/delete/:id", async (req, res) => {
   try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
