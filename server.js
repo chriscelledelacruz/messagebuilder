@@ -1,19 +1,19 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
-const FormData = require("form-data"); 
-const { Blob } = require("buffer"); // Required for Native FormData compatibility
 require("dotenv").config();
 
 const app = express();
 
+// --- FIX 1: DISABLE ETAGS & CACHING TO PREVENT 304 ERRORS ---
 app.set('etag', false);
 app.disable('view cache');
 
+// Middleware
 app.use(express.json({ limit: '50mb' })); 
 
+// Multer Setup
 const upload = multer({ storage: multer.memoryStorage() });
-const cpUpload = upload.fields([{ name: 'taskCsv', maxCount: 1 }, { name: 'profileCsv', maxCount: 1 }]);
 
 const STAFFBASE_BASE_URL = process.env.STAFFBASE_BASE_URL;
 const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
@@ -37,90 +37,45 @@ async function sb(method, path, body) {
   let retries = 3;
   while (retries > 0) {
     const res = await fetch(url, options);
-    
     if (res.status === 429) {
+      console.warn(`[API 429] Rate limit hit. Waiting 2s...`);
       await delay(2000);
       retries--;
       continue;
     }
-    
-    if (res.status === 204) return {}; 
-
     if (!res.ok) {
       const txt = await res.text();
+      console.error(`[API Error] ${method} ${path}: ${res.status} - ${txt}`); 
       throw new Error(`API ${res.status}: ${txt}`);
     }
-    
+    if (res.status === 204) return {};
     return res.json();
   }
-  throw new Error("API Timeout");
+  throw new Error("API Timeout after retries");
 }
 
-// --- SAFE UPLOAD HELPER ---
-async function sbUpload(path, buffer, filename) {
-  const url = `${STAFFBASE_BASE_URL}${path}`;
-  const form = new FormData();
-  
-  // Wrap buffer in a Blob for native Node.js fetch compatibility
-  const blob = new Blob([buffer], { type: 'text/csv' });
-  form.append('file', blob, filename);
+// --- LOGIC HELPERS ---
 
-  const options = {
-    method: 'POST',
-    headers: {
-      "Authorization": `Basic ${STAFFBASE_TOKEN}`,
-      // Do NOT set Content-Type manually; fetch handles boundary
-    },
-    body: form,
-    duplex: 'half' // Required for Node.js 18+
-  };
-
-  const res = await fetch(url, options);
-
-  if (res.status === 204) return { id: null };
-
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Upload Failed ${res.status}: ${txt}`);
-  }
-
-  const text = await res.text();
-  return text ? JSON.parse(text) : {}; 
-}
-
-// --- CSV PARSER ---
-function parseCSV(buffer) {
-  try {
-    const text = buffer.toString("utf8");
-    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    if (lines.length === 0) return { headers: [], rows: [] };
-
-    const separator = lines[0].includes(';') ? ';' : ',';
-    const headers = lines[0].split(separator).map(h => h.trim().replace(/^"|"$/g, ''));
-    
-    const rows = lines.slice(1).map(line => {
-      const values = line.split(separator).map(v => v.trim().replace(/^"|"$/g, ''));
-      const rowObj = {};
-      headers.forEach((h, i) => rowObj[h] = values[i] || "");
-      return rowObj;
-    });
-
-    return { headers, rows, separator };
-  } catch (e) { return { headers: [], rows: [] }; }
-}
-
+// Helper to clean HTML entities which break Regex
 function cleanText(text) {
   if (!text) return "";
-  return text.replace(/<[^>]+>/g, ' ').trim();
+  return text
+    .replace(/&nbsp;/gi, ' ')  // Replace non-breaking space
+    .replace(/&amp;/gi, '&')
+    .replace(/<[^>]+>/g, ' ')  // Strip HTML tags
+    .replace(/\s+/g, ' ')      // Collapse multiple spaces
+    .trim();
 }
 
 async function getAllUsersMap() {
   const userMap = new Map(); 
   let offset = 0; const limit = 100;
+  
   while (true) {
     try {
       const res = await sb("GET", `/users?limit=${limit}&offset=${offset}`);
       if (!res.data || res.data.length === 0) break;
+
       for (const user of res.data) {
         const storeId = user.profile?.[HIDDEN_ATTRIBUTE_KEY];
         if (storeId) {
@@ -133,10 +88,50 @@ async function getAllUsersMap() {
       }
       if (res.data.length < limit) break;
       offset += limit;
+      if (offset % 1000 === 0) await delay(200); 
     } catch (e) { break; }
   }
   return userMap;
 }
+
+function parseTaskCSV(buffer) {
+  try {
+    const text = buffer.toString("utf8");
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    const tasks = [];
+    lines.forEach(line => {
+      const [title, desc, date] = line.split(';').map(s => s ? s.trim() : '');
+      if (title) {
+        let dueDate = null;
+        if(date) dueDate = new Date(date).toISOString();
+        tasks.push({ title, description: desc || "", dueDate });
+      }
+    });
+    return tasks;
+  } catch (e) { return []; }
+}
+
+async function discoverProjectsByStoreIds(storeIds) {
+  const projectMap = {};
+  let offset = 0; const limit = 100;
+  while(true) {
+    const res = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
+    if(!res.data || res.data.length === 0) break;
+    
+    res.data.forEach(inst => {
+      const title = inst.config?.localization?.en_US?.title || "";
+      const match = title.match(/^Store\s*#?\s*(\w+)$/i);
+      if(match && storeIds.includes(match[1])) {
+        projectMap[match[1]] = inst.id;
+      }
+    });
+    if(res.data.length < limit) break;
+    offset += limit;
+  }
+  return projectMap;
+}
+
+// --- ROUTES ---
 
 // 1. VERIFY USERS
 app.post("/api/verify-users", async (req, res) => {
@@ -155,128 +150,137 @@ app.post("/api/verify-users", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 2. CREATE POST
-app.post("/api/create", cpUpload, async (req, res) => {
+// 2. CREATE ADHOC POST & TASKS
+app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
-    let { verifiedUsers, title, department, storeIds: rawStoreIds } = req.body;
-    if (!department || department === 'undefined') department = "Uncategorized";
+    // Debug Incoming Data
+    console.log("[CREATE] Payload:", { 
+      hasFile: !!req.file, 
+      title: req.body.title, 
+      dept: req.body.department 
+    });
 
-    // --- HANDLE PROFILE CSV IMPORT ---
-    let fieldMergeTable = "";
-    
-    if (req.files && req.files['profileCsv']) {
-      const file = req.files['profileCsv'][0];
-      const parsed = parseCSV(file.buffer);
-      
-      if (parsed.headers.length > 0) {
-        let idColumn = parsed.headers.find(h => /store\s*id|external\s*id|id/i.test(h)) || parsed.headers[0];
-        const mapping = {};
-        mapping["externalId"] = idColumn;
+    let { verifiedUsers, title, department } = req.body;
 
-        parsed.headers.forEach(h => {
-          if (h !== idColumn) {
-            mapping[`profile-field:${h}`] = h;
-          }
-        });
-
-        console.log("[IMPORT] Triggering CSV Import...", mapping);
-
-        const uploadRes = await sbUpload("/users/imports", file.buffer, file.originalname);
-        const importId = uploadRes.id;
-
-        // --- FIX: USE PATCH INSTEAD OF PUT ---
-        await sb("PATCH", `/users/imports/${importId}/config`, {
-          delta: true,
-          separator: parsed.separator,
-          mapping: mapping
-        });
-
-        await sb("PATCH", `/users/imports/${importId}`, { state: "IMPORT_PENDING" });
-        console.log(`[IMPORT] Started import ${importId}`);
-
-        if (parsed.rows.length > 0) {
-          const firstRow = parsed.rows[0];
-          let tableRows = "";
-          parsed.headers.forEach((header, index) => {
-            if (header !== idColumn) {
-              const syntax = `{{user.profile.${header}}}`;
-              const value = firstRow[header] || "-";
-              const bg = index % 2 === 0 ? "#ffffff" : "#f9f9f9";
-              tableRows += `
-                <tr style="background-color:${bg};">
-                  <td style="padding:10px; border-bottom:1px solid #eee; color:#333;"><strong>${header}</strong></td>
-                  <td style="padding:10px; border-bottom:1px solid #eee; font-family:monospace; color:#0056b3;">${syntax}</td>
-                  <td style="padding:10px; border-bottom:1px solid #eee; color:#666;">${value}</td>
-                </tr>`;
-            }
-          });
-          fieldMergeTable = `
-            <div style="margin-top:20px; font-family: sans-serif;">
-              <h3 style="margin-bottom:10px; color:#333;">Field Merge Reference</h3>
-              <div style="overflow-x:auto; border:1px solid #eee; border-radius:6px;">
-                <table style="width:100%; border-collapse:collapse; font-size:14px;">
-                  <thead>
-                    <tr style="background-color:#f4f6f8; text-align:left;">
-                      <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Attribute</th>
-                      <th style="padding:10px; border-bottom:2px solid #ddd; width:40%;">Syntax</th>
-                      <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Sample Value</th>
-                    </tr>
-                  </thead>
-                  <tbody>${tableRows}</tbody>
-                </table>
-              </div>
-            </div>`;
-        }
-      }
+    // --- FIX 2: Prevent "undefined" Department ---
+    if (!department || department === 'undefined' || department.trim() === '') {
+        department = "Uncategorized";
     }
 
-    // --- STANDARD POST CREATION ---
-    const userIds = [];
-    if (!verifiedUsers) {
-       let targetStoreIds = [];
-       if (rawStoreIds) try { targetStoreIds = JSON.parse(rawStoreIds); } catch(e) {}
-       const userMap = await getAllUsersMap();
-       targetStoreIds.forEach(id => { const u = userMap.get(String(id)); if(u) userIds.push(u.id); });
-    } else {
-       // logic for pre-verified object if needed
+    if (typeof verifiedUsers === 'string') {
+      try { verifiedUsers = JSON.parse(verifiedUsers); } catch(e) {}
     }
-    
-    let taskListHTML = "";
-    if (req.files && req.files['taskCsv']) {
-       const taskRows = parseCSV(req.files['taskCsv'][0].buffer).rows;
-       if (taskRows.length > 0) {
-         taskListHTML = "<h3>Action Items</h3><ul>";
-         taskRows.forEach(t => taskListHTML += `<li><strong>${t.Title || t.title}</strong>: ${t.Description || t.description || ''}</li>`);
-         taskListHTML += "</ul>";
+
+    // Fallback logic if verifying in frontend failed
+    if (!verifiedUsers || verifiedUsers.length === 0) {
+       let { storeIds } = req.body;
+       if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
+       
+       if (storeIds && storeIds.length > 0) {
+         console.log("Fallback: Resolving raw store IDs...");
+         const userMap = await getAllUsersMap();
+         verifiedUsers = [];
+         for(const id of storeIds) {
+           const u = userMap.get(String(id));
+           if(u) verifiedUsers.push(u);
+         }
        }
     }
 
+    if (!verifiedUsers || verifiedUsers.length === 0) {
+      return res.status(400).json({ error: "No verified users provided." });
+    }
+
+    const userIds = verifiedUsers.map(u => u.id);
+    const storeIds = verifiedUsers.map(u => u.csvId);
+
+    console.log(`[CREATE] Final: ${userIds.length} users. Dept: "${department}"`);
+
     const now = Date.now();
+    const metaExternalID = `adhoc-${now}`;
+
+    // --- NEW SECTION START: Parse Tasks Early ---
+    let tasks = [];
+    let taskListHTML = "";
+    
+    if (req.file) {
+      tasks = parseTaskCSV(req.file.buffer);
+      
+      if (tasks.length > 0) {
+        taskListHTML = "<h3>Action Items</h3><ul>";
+        tasks.forEach(t => {
+          // Format date if it exists
+          let dateDisplay = "";
+          if (t.dueDate) {
+             const d = new Date(t.dueDate);
+             dateDisplay = ` <span style="color:#666; font-size:0.9em;">(Due: ${d.toLocaleDateString()})</span>`;
+          }
+          taskListHTML += `<li><strong>${t.title}</strong><br>${t.description || ""}${dateDisplay}</li>`;
+        });
+        taskListHTML += "</ul>";
+      }
+    }
+    // --- NEW SECTION END ---
+
+    // A. Create Channel
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
-      externalID: `adhoc-${now}`, 
-      config: { localization: { en_US: { title: title }, de_DE: { title: title } } },
+      externalID: metaExternalID, 
+      config: {
+        localization: { en_US: { title: title }, de_DE: { title: title } }
+      },
       accessorIDs: userIds
     });
+    
+    const channelId = channelRes.id;
 
-    let contentHTML = "";
-    if (taskListHTML) contentHTML += taskListHTML;
-    else contentHTML += `<p>Please review the details below.</p>`; 
-
-    if (fieldMergeTable) contentHTML += `<br><hr style="border:0; border-top:1px solid #eee; margin: 20px 0;">${fieldMergeTable}`;
-
-    await sb("POST", `/channels/${channelRes.id}/posts`, {
+    // B. Create Post (Embed Metadata reliably)
+    // We add spaces inside the HTML to help the parser later
+    const contentHTML = `${title}<hr>${taskListHTML}`;
+    const contentTeaser = `Category: ${department}; Targeted Stores: ${userIds.length}`
+    const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
           title: title, 
           content: contentHTML,
-          teaser: `Category: ${department}; Targeted Stores: ${userIds.length}`,
+          teaser: contentTeaser,
           kicker: department 
         } 
       }
     });
 
-    res.json({ success: true, channelId: channelRes.id });
+    // C. Handle Tasks
+    let taskCount = 0;
+    if (req.file) {
+      const tasks = parseTaskCSV(req.file.buffer);
+      if (tasks.length > 0) {
+        const projectMap = await discoverProjectsByStoreIds(storeIds);
+        const installationIds = Object.values(projectMap);
+        const chunkedInsts = [];
+        for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
+
+        for (const chunk of chunkedInsts) {
+          await Promise.all(chunk.map(async (instId) => {
+            try {
+              const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
+              for (const t of tasks) {
+                await sb("POST", `/tasks/${instId}/task`, {
+                  taskListId: listRes.id,
+                  title: t.title,
+                  description: t.description,
+                  dueDate: t.dueDate,
+                  status: "OPEN",
+                  assigneeIds: [] 
+                });
+              }
+            } catch(e) {}
+          }));
+        }
+        taskCount = tasks.length * installationIds.length;
+      }
+    }
+
+    res.json({ success: true, channelId, postId: postRes.id, taskCount });
 
   } catch (err) {
     console.error(err);
@@ -284,51 +288,117 @@ app.post("/api/create", cpUpload, async (req, res) => {
   }
 });
 
-// 3. GET ITEMS
+// 3. GET PAST SUBMISSIONS
 app.get("/api/items", async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache');
+  // --- FIX 3: AGGRESSIVE CACHE BUSTING ---
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  
   try {
     const items = [];
     let offset = 0; const limit = 100;
+
     while(true) {
       const result = await sb("GET", `/spaces/${STAFFBASE_SPACE_ID}/installations?limit=${limit}&offset=${offset}`);
       if (!result.data || result.data.length === 0) break;
 
       for (const inst of result.data) {
         if (inst.pluginID !== 'news') continue;
-        const extID = inst.externalID || "";
-        const title = inst.config?.localization?.en_US?.title || "Untitled";
-        const dateStr = inst.createdAt || inst.created || new Date().toISOString();
 
-        if (extID.startsWith('adhoc') || title.startsWith('[external]')) {
-           const item = { 
-             channelId: inst.id, 
-             title, 
-             status: "Draft", 
-             department: "Uncategorized", 
-             createdAt: dateStr,
-             userCount: inst.accessorIDs ? inst.accessorIDs.length : 0
-           };
-           
-           try {
-             const posts = await sb("GET", `/channels/${inst.id}/posts?limit=1`);
-             if (posts.data && posts.data.length > 0) {
-               const p = posts.data[0];
-               if (p.published) item.status = "Published";
-               else if (p.planned) item.status = "Scheduled";
-               item.department = p.contents?.en_US?.kicker || item.department;
-               
-               const teaser = p.contents?.en_US?.teaser || "";
-               const countMatch = teaser.match(/Targeted Stores:\s*(\d+)/);
-               if(countMatch) item.userCount = countMatch[1];
-             }
-           } catch(e) {}
-           items.push(item);
+        let item = null;
+        const title = inst.config?.localization?.en_US?.title || "Untitled";
+        const extID = inst.externalID || "";
+        
+        // Use accessorIDs as a fallback if extraction fails
+       const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
+    
+    // FIX 1: Use 'createdAt' (standard API) and fallback to 'created' just in case
+        const dateStr = inst.createdAt || inst.created || new Date().toISOString();
+    
+// 1. DETERMINE ITEM TYPE & INITIAL METADATA
+        
+        // SIMPLIFIED: Catch anything starting with "adhoc" (v1, v2, etc.)
+        if (extID.startsWith('adhoc')) {
+          item = {
+            channelId: inst.id,
+            title: title,
+            department: "Uncategorized", // Default placeholder
+            userCount: defaultUserCount,
+            createdAt: dateStr,
+            status: "Draft"
+          };
+        }
+        else if (title.startsWith('[external]')) {
+          // Keep this! It handles your very old migrated data
+          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::(.*?) - (.+)$/);
+          if (match) {
+            item = {
+              channelId: inst.id,
+              title: match[4],
+              department: match[3],
+              userCount: parseInt(match[1], 10),
+              createdAt: dateStr,
+              status: "Draft"
+            };
+          }
+        }
+
+        if (item) {
+          try {
+            const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
+            if (posts.data && posts.data.length > 0) {
+              const p = posts.data[0];
+              
+              // 1. Get the source text (Prioritize Teaser)
+              const teaserText = p.contents?.en_US?.teaser || "";
+              const kickerText = p.contents?.en_US?.kicker || "";
+              const rawContent = p.contents?.en_US?.content || "";
+              const plainBodyText = cleanText(rawContent);
+
+              // 2. EXTRACT DEPARTMENT
+              // First try the Teaser
+              let deptMatch = teaserText.match(/(?:Category|Department):\s*([^;]+)/i);
+              
+              if (deptMatch && deptMatch[1]) {
+                  item.department = deptMatch[1].trim(); 
+              } 
+              // Fallback: Check Kicker
+              else if (kickerText) {
+                  item.department = kickerText.trim();
+              }
+              // Fallback: Check Body (Legacy support)
+              else {
+                  deptMatch = plainBodyText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
+                  if (deptMatch && deptMatch[1]) item.department = deptMatch[1].trim();
+              }
+
+              // 3. EXTRACT USER COUNT
+              // First try the Teaser
+              let countMatch = teaserText.match(/Targeted Stores:\s*(\d+)/i);
+              
+              if (countMatch && countMatch[1]) {
+                  item.userCount = parseInt(countMatch[1], 10);
+              } 
+              // Fallback: Check Body (Legacy support)
+              else {
+                  countMatch = plainBodyText.match(/Targeted Stores:\s*(\d+)/i);
+                  if (countMatch && countMatch[1]) item.userCount = parseInt(countMatch[1], 10);
+              }
+              
+              // 4. STATUS
+              if (p.published) item.status = "Published";
+              else if (p.planned) item.status = "Scheduled";
+            }
+          } catch(e) { console.error("Task Error:", e); throw e; }
+          items.push(item);
         }
       }
+
       if (result.data.length < limit) break;
       offset += limit;
     }
+
     items.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
     res.json({ items });
   } catch (err) {
@@ -336,17 +406,12 @@ app.get("/api/items", async (req, res) => {
     res.json({ items: [] });
   }
 });
-
 // 4. DELETE
 app.delete("/api/delete/:id", async (req, res) => {
   try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Needed for Vercel
-module.exports = app;
-
-if (require.main === module) {
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => console.log(`🚀 Server running`));
-}
+app.use(express.static(path.join(__dirname, "public")));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Server running at http://localhost:${PORT}`));
