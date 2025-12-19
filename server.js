@@ -231,13 +231,17 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     // --- UPDATE END ---
 
     // A. Create Channel
-const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
+      const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
       config: {
         localization: { en_US: { title: title }, de_DE: { title: title } }
       },
-      accessorIDs: allAccessorIDs // Updated to include Ops Group
+      // CHANGED: Use an object structure to explicitly separate Users and Groups
+      accessorIDs: {
+        userIds: userIds,
+        groupIds: [OPS_GROUP_ID]
+      }
     });
     
     const channelId = channelRes.id;
