@@ -38,6 +38,17 @@
       padding: 4px 10px; background: #eee; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem;
     }
     .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* MANUAL TASKS STYLING */
+    .manual-task-row {
+      display: flex; gap: 8px; margin-bottom: 8px; align-items: center;
+    }
+    .manual-task-row input { flex: 1; font-size: 0.9rem; padding: 8px; }
+    .manual-task-row input.task-date { max-width: 140px; }
+    .btn-icon { background:#eee; border:none; border-radius:4px; cursor:pointer; padding: 8px 12px; font-weight:bold;}
+    .btn-icon:hover { background:#ddd; }
+    .btn-remove { color: red; }
+    
   </style>
 </head>
 <body>
@@ -55,17 +66,23 @@
         <input id="title" name="title" type="text" placeholder="e.g. Q4 Audit Requirements" required>
       </div>
 
-      <div class="form-group">
-        <label for="department">Category</label>
-        <select id="department" name="department" required>
-          <option value="">Select a category</option>
-          <option value="Merchandising">Merchandising</option>
-          <option value="Marketing">Marketing</option>
-          <option value="Audit">Audit</option>
-          <option value="Operations">Operations</option>
-          <option value="HR">HR</option>
-          <option value="IT">IT</option>
-        </select>
+      <div style="display:flex; gap:15px;">
+        <div class="form-group" style="flex:1">
+            <label for="department">Category</label>
+            <select id="department" name="department" required>
+            <option value="">Select a category</option>
+            <option value="Merchandising">Merchandising</option>
+            <option value="Marketing">Marketing</option>
+            <option value="Audit">Audit</option>
+            <option value="Operations">Operations</option>
+            <option value="HR">HR</option>
+            <option value="IT">IT</option>
+            </select>
+        </div>
+        <div class="form-group" style="flex:1">
+            <label for="deadline">Deadline (Optional)</label>
+            <input type="date" id="deadline" name="deadline">
+        </div>
       </div>
 
       <div class="form-group">
@@ -94,20 +111,20 @@
       </div>
 
       <div class="form-group">
-        <label>Task List (CSV)</label>
+        <label>Action Items</label>
+        <span class="sub-label">Add tasks directly or upload a CSV below.</span>
+        
+        <div id="manualTasksContainer" style="margin-bottom: 10px; background: #fafafa; padding: 10px; border-radius: 6px; border: 1px solid #eee;">
+            </div>
+        <button type="button" id="addTaskBtn" class="post-link" style="margin:0;">+ Add Task</button>
+      </div>
+
+      <div class="form-group">
+        <label>Task List (CSV - Optional)</label>
         <span class="sub-label">Columns: <code>Title;Description;Date</code></span>
         <div class="file-drop-area">
           <span class="file-msg" id="taskCsvFileName">Drag and drop or click to select CSV</span>
           <input type="file" id="taskCsv" name="taskCsv" accept=".csv">
-        </div>
-      </div>
-
-      <div class="form-group">
-        <label>Field Merge (Optional)</label>
-        <span class="sub-label">Upload CSV file (Sent to <code>/api/users/imports</code>)</span>
-        <div class="file-drop-area">
-          <span class="file-msg" id="profileCsvFileName">Select Profile CSV (optional)</span>
-          <input type="file" id="profileCsv" name="profileCsv" accept=".csv">
         </div>
       </div>
 
@@ -119,14 +136,15 @@
       <button type="submit">Create Adhoc Post</button>
       <div id="status"></div>
     </form>
-                <div class="legend-container">
+
+    <div class="legend-container">
       <div class="legend-item"><span class="color-dot" style="background:var(--cat-merch)"></span>Merch</div>
       <div class="legend-item"><span class="color-dot" style="background:var(--cat-mkt)"></span>Marketing</div>
       <div class="legend-item"><span class="color-dot" style="background:var(--cat-audit)"></span>Audit</div>
       <div class="legend-item"><span class="color-dot" style="background:var(--cat-ops)"></span>Ops</div>
       <div class="legend-item"><span class="color-dot" style="background:var(--cat-hr)"></span>HR</div>
       <div class="legend-item"><span class="color-dot" style="background:var(--cat-it)"></span>IT</div>
-                </div>
+    </div>
   </div>
 
   <div class="section-title-area">
@@ -134,7 +152,6 @@
     <button id="toggleFilters" class="post-link" style="margin:0;">Show Filters</button>
   </div>
 
-    
   <div class="filters-container" id="filtersContainer" style="display: none;">
     <div><label>Category</label><select id="filterDepartment"><option value="">All</option>
           <option value="Merchandising">Merchandising</option>
@@ -144,11 +161,14 @@
           <option value="HR">HR</option>
           <option value="IT">IT</option>
         </select> </div>
-    <div><label>Search</label><input type="text" id="filterTitle" placeholder="Title..."></div>
+    <div><label>Search Title</label><input type="text" id="filterTitle" placeholder="Title..."></div>
+    
+    <div><label>Target Store ID</label><input type="text" id="filterStoreId" placeholder="e.g. 10001"></div>
+    
     <div><label>Status</label><select id="filterStatus"><option value="">All</option><option value="draft" selected>Draft</option><option value="published">Published</option></select></div>
-    <input type="date" id="filterDateFrom" style="display:none"><input type="date" id="filterDateTo" style="display:none"><select id="sortOrder" style="display:none"><option value="desc">Desc</option></select>
+    
+    <button id="applyFilters" class="post-link" style="height:44px; margin-top:22px; background:var(--se-green); color:white;">Apply</button>
     <button id="resetFilters" class="post-link" style="height:44px; margin-top:22px;">Reset</button>
-
   </div>
 
   <div id="list"></div>
