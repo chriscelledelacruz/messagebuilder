@@ -1,3 +1,4 @@
+const { Blob } = require("buffer");
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
@@ -61,26 +62,31 @@ async function sb(method, path, body) {
 
 // --- NEW: API Helper for File Uploads (Native Node.js Version) ---
 // --- UPDATED: Safe Upload Helper for Vercel (Fixes JSON Error) ---
+// --- UPDATED: Robust Upload Helper (Handles Buffers & Blobs) ---
 async function sbUpload(path, buffer, filename) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const form = new FormData();
-  form.append('file', buffer, { filename: filename, contentType: 'text/csv' });
+  
+  // FIX: Wrap buffer in a Blob to satisfy Native FormData requirements
+  const blob = new Blob([buffer], { type: 'text/csv' });
+  form.append('file', blob, filename);
 
   const options = {
     method: 'POST',
     headers: {
       "Authorization": `Basic ${STAFFBASE_TOKEN}`,
-      ...form.getHeaders() // Correctly sets boundary
+      // Note: When using Native FormData + fetch, do NOT set Content-Type manually.
+      // The fetch client generates the boundary automatically.
     },
     body: form,
-    duplex: 'half' // Prevents "EOF" errors
+    duplex: 'half' // Required for Node.js 18+
   };
 
   const res = await fetch(url, options);
 
   // 1. Handle "204 No Content" (Success but empty)
   if (res.status === 204) {
-    return { id: null }; // Return dummy object if API sends nothing
+    return { id: null };
   }
 
   // 2. Handle Errors
@@ -89,7 +95,7 @@ async function sbUpload(path, buffer, filename) {
     throw new Error(`Upload Failed ${res.status}: ${txt}`);
   }
 
-  // 3. Safe JSON Parse (in case 200/201 has empty body)
+  // 3. Safe JSON Parse
   const text = await res.text();
   return text ? JSON.parse(text) : {}; 
 }
