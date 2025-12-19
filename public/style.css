@@ -324,12 +324,12 @@ button[type="submit"]:hover {
 /* --- Category Colors --- */
 /* We use CSS variables for easy tweaking */
 :root {
-  --cat-merch: #9b59b6; /* Purple */
+  --cat-merch: #ffd166; /* Yellow */
   --cat-mkt:   #F58220; /* 7-Eleven Orange */
   --cat-audit: #e74c3c; /* Red */
-  --cat-ops:   #3498db; /* Blue */
-  --cat-hr:    #e67e22; /* Carrot/Pinkish */
-  --cat-it:    #1abc9c; /* Teal */
+  --cat-ops:   #118ab2; /* Blue */
+  --cat-hr:    #06d6a0; /* Green */
+  --cat-it:    #073b4c; /* Teal */
   --cat-none:  #95a5a6; /* Gray */
 }
 
