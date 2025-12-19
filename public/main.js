@@ -4,21 +4,68 @@ const status = document.getElementById("status");
 const profileCsvInput = document.getElementById("profileCsv");
 const profileCsvFileName = document.getElementById("profileCsvFileName");
 
-if (profileCsvInput) {
-  profileCsvInput.addEventListener("change", () => {
-    profileCsvFileName.textContent = profileCsvInput.files.length > 0 ? profileCsvInput.files[0].name : "No file selected";
-  });
-}
-
-// File input elements
+// File input listeners
 const taskCsvInput = document.getElementById("taskCsv");
 const taskCsvFileName = document.getElementById("taskCsvFileName");
-
-// Update file name display
 if (taskCsvInput) {
   taskCsvInput.addEventListener("change", () => {
     taskCsvFileName.textContent = taskCsvInput.files.length > 0 ? taskCsvInput.files[0].name : "No file selected";
   });
+}
+
+// --- DYNAMIC TASK FORM LOGIC ---
+const manualTasksContainer = document.getElementById("manualTasksContainer");
+const addTaskBtn = document.getElementById("addTaskBtn");
+
+// Initialize with one row
+addTaskRow();
+
+addTaskBtn.addEventListener("click", addTaskRow);
+
+function addTaskRow() {
+    const div = document.createElement("div");
+    div.className = "manual-task-row";
+    div.innerHTML = `
+        <input type="text" placeholder="Task Title" class="t-title" required>
+        <input type="text" placeholder="Description" class="t-desc">
+        <input type="date" class="t-date" title="Due Date">
+        <button type="button" class="btn-icon btn-remove" title="Remove">&times;</button>
+    `;
+    
+    // Remove handler
+    div.querySelector(".btn-remove").addEventListener("click", () => {
+        // Only allow removing if more than one row, or just clear it?
+        // User asked to "add more as needed", keeping it simple: allow delete.
+        // If it's the last one, maybe just clear inputs? Let's just remove it.
+        if (manualTasksContainer.children.length > 1) {
+            div.remove();
+        } else {
+            div.querySelector('.t-title').value = '';
+            div.querySelector('.t-desc').value = '';
+            div.querySelector('.t-date').value = '';
+        }
+    });
+
+    manualTasksContainer.appendChild(div);
+}
+
+function getManualTasks() {
+    const rows = manualTasksContainer.querySelectorAll(".manual-task-row");
+    const tasks = [];
+    rows.forEach(row => {
+        const title = row.querySelector(".t-title").value.trim();
+        const desc = row.querySelector(".t-desc").value.trim();
+        const date = row.querySelector(".t-date").value;
+        
+        if (title) {
+            tasks.push({
+                title: title,
+                description: desc,
+                dueDate: date || null
+            });
+        }
+    });
+    return tasks;
 }
 
 // --- SMART SEARCH & PAGINATION LOGIC ---
@@ -36,7 +83,6 @@ async function verifyStores() {
   const countMsg = document.getElementById('storeCountMsg');
   const btn = document.getElementById('verifyBtn');
 
-  // Reset UI
   validStores = [];
   resultsContainer.style.display = 'none';
   countMsg.textContent = '';
@@ -49,7 +95,6 @@ async function verifyStores() {
     return;
   }
 
-  // 1. Parse IDs from text
   const searchIds = rawInput.split(/[\s,]+/).filter(Boolean);
   const uniqueIds = [...new Set(searchIds)];
 
@@ -57,7 +102,6 @@ async function verifyStores() {
   btn.disabled = true;
 
   try {
-    // 2. Send IDs to backend
     const res = await fetch("/api/verify-users", {
       method: "POST",
       headers: { 'Content-Type': 'application/json' },
@@ -67,29 +111,23 @@ async function verifyStores() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Verification failed");
 
-    // 3. Handle Results
     validStores = data.foundUsers;
     const notFoundCount = data.notFoundIds.length;
     
-    // ERROR CODE UPDATE: Explicitly list failed IDs
     if (notFoundCount > 0) {
         const errorList = data.notFoundIds.join(', ');
         if (validStores.length === 0) {
-             // Case: ALL failed
-             status.textContent = `✗ No valid stores found. The following IDs were not found: ${errorList}`;
+             status.textContent = `✗ No valid stores found. IDs not found: ${errorList}`;
              status.className = "status-error";
         } else {
-             // Case: SOME failed
-             status.textContent = `⚠️ Warning: ${notFoundCount} IDs were not found: ${errorList}`;
-             status.className = "status-error"; // Yellow/Red warning style
+             status.textContent = `⚠️ Warning: ${notFoundCount} IDs not found: ${errorList}`;
+             status.className = "status-error"; 
         }
     } else if (validStores.length > 0) {
-        // Case: ALL success
         status.textContent = "✓ All stores verified successfully.";
         status.className = "status-success";
     }
 
-    // Show Table if we have ANY valid stores
     if (validStores.length > 0) {
       resultsContainer.style.display = 'block';
       currentPage = 1;
@@ -109,18 +147,12 @@ async function verifyStores() {
 function renderStoreTable() {
   const tbody = document.getElementById('storeTableBody');
   tbody.innerHTML = '';
-  
   const start = (currentPage - 1) * ITEMS_PER_PAGE;
   const end = start + ITEMS_PER_PAGE;
   const pageData = validStores.slice(start, end);
 
   pageData.forEach(store => {
-    const row = `<tr>
-      <td><code>${store.csvId}</code></td>
-      <td>${store.name}</td>
-      <td style="color:var(--se-green); font-weight:bold;">Active</td>
-    </tr>`;
-    tbody.innerHTML += row;
+    tbody.innerHTML += `<tr><td><code>${store.csvId}</code></td><td>${store.name}</td><td style="color:var(--se-green); font-weight:bold;">Active</td></tr>`;
   });
 
   const maxPage = Math.ceil(validStores.length / ITEMS_PER_PAGE) || 1;
@@ -143,7 +175,11 @@ form.addEventListener("submit", async (e) => {
   const taskCsvFile = document.getElementById("taskCsv").files[0];
   const title = document.getElementById("title").value.trim();
   const department = document.getElementById("department").value;
+  const deadline = document.getElementById("deadline").value;
   const notify = document.getElementById("notify").checked;
+
+  // Gather Manual Tasks
+  const manualTasks = getManualTasks();
 
   if (validStores.length === 0) {
     status.textContent = "Error: Please verify at least one valid store before creating a post.";
@@ -161,7 +197,9 @@ form.addEventListener("submit", async (e) => {
     formData.append("storeIds", JSON.stringify(storeIds));
     formData.append("title", title);
     formData.append("department", department);
+    formData.append("deadline", deadline);
     formData.append("notify", notify);
+    formData.append("manualTasks", JSON.stringify(manualTasks));
     
     if (taskCsvFile) {
       formData.append("taskCsv", taskCsvFile);
@@ -177,7 +215,6 @@ form.addEventListener("submit", async (e) => {
 
     status.textContent = "✓ Success! Reloading...";
     status.className = "status-success";
-    
     setTimeout(() => location.reload(), 1500);
 
   } catch (err) {
@@ -190,6 +227,8 @@ form.addEventListener("submit", async (e) => {
 const filterDepartment = document.getElementById("filterDepartment");
 const filterTitle = document.getElementById("filterTitle");
 const filterStatus = document.getElementById("filterStatus");
+const filterStoreId = document.getElementById("filterStoreId"); // New
+const applyFilters = document.getElementById("applyFilters"); // New button used to trigger fetch
 const resetFilters = document.getElementById("resetFilters");
 const toggleFiltersBtn = document.getElementById("toggleFilters");
 const filtersContainer = document.getElementById("filtersContainer");
@@ -197,12 +236,24 @@ const filtersContainer = document.getElementById("filtersContainer");
 let allItems = [];
 
 async function loadPersistedItems() {
+  const storeIdVal = filterStoreId.value.trim();
+  let url = "/api/items";
+  if (storeIdVal) {
+      url += `?storeId=${encodeURIComponent(storeIdVal)}`;
+  }
+  
+  // Show loading state if filtering
+  list.innerHTML = '<div style="text-align:center; padding:20px;">Loading...</div>';
+
   try {
-    const res = await fetch("/api/items");
+    const res = await fetch(url);
     const data = await res.json();
     allItems = data.items || [];
     filterAndRenderItems();
-  } catch (err) { console.error(err); }
+  } catch (err) { 
+      console.error(err); 
+      list.innerHTML = '<div style="text-align:center; color:red;">Error loading items</div>';
+  }
 }
 
 function filterAndRenderItems() {
@@ -229,7 +280,6 @@ function filterAndRenderItems() {
     div.className = `item cat-${safeCat}`; 
     
     const editUrl = `https://app.staffbase.com/admin/plugin/news/${item.channelId}/posts`;
-    // Status Badge Logic
     let badgeClass = "tag-draft";
     if (item.status === "Published") badgeClass = "tag-published";
     if (item.status === "Scheduled") badgeClass = "tag-scheduled";
@@ -266,13 +316,27 @@ function attachDeleteListeners() {
 }
 
 // Event Listeners for Filters
+// For text inputs, we usually wait for user to finish or click apply.
+// Since StoreID requires a server fetch, we use the "Apply" button or Enter key.
+
+applyFilters.addEventListener("click", loadPersistedItems);
+filterStoreId.addEventListener("keypress", (e) => {
+    if (e.key === 'Enter') loadPersistedItems();
+});
+
+// Existing client-side filters can still be immediate
 filterDepartment.addEventListener("change", filterAndRenderItems);
 filterTitle.addEventListener("input", filterAndRenderItems);
 filterStatus.addEventListener("change", filterAndRenderItems);
+
 resetFilters.addEventListener("click", () => {
-  filterDepartment.value = ""; filterTitle.value = ""; filterStatus.value = "draft";
-  filterAndRenderItems();
+  filterDepartment.value = ""; 
+  filterTitle.value = ""; 
+  filterStatus.value = "draft";
+  filterStoreId.value = "";
+  loadPersistedItems(); // Reload full list
 });
+
 toggleFiltersBtn.addEventListener("click", () => {
   filtersContainer.style.display = filtersContainer.style.display === "none" ? "grid" : "none";
 });
