@@ -53,19 +53,29 @@ async function sb(method, path, body) {
   throw new Error("API Timeout");
 }
 
-// --- NEW: API Helper for File Uploads (Multipart) ---
+// --- UPDATED: API Helper for File Uploads (Multipart Fix) ---
 async function sbUpload(path, buffer, filename) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const form = new FormData();
   form.append('file', buffer, { filename: filename, contentType: 'text/csv' });
 
+  // Calculate length manually to satisfy strict APIs and native fetch
+  const length = await new Promise((resolve, reject) => {
+    form.getLength((err, len) => {
+      if (err) reject(err);
+      else resolve(len);
+    });
+  });
+
   const options = {
     method: 'POST',
     headers: {
       "Authorization": `Basic ${STAFFBASE_TOKEN}`,
-      ...form.getHeaders() // Important for boundary
+      "Content-Length": length, // Explicitly set length
+      ...form.getHeaders()
     },
-    body: form
+    body: form,
+    duplex: 'half' // <--- CRITICAL FIX for Node.js 18+ fetch
   };
 
   const res = await fetch(url, options);
@@ -73,7 +83,7 @@ async function sbUpload(path, buffer, filename) {
     const txt = await res.text();
     throw new Error(`Upload Failed ${res.status}: ${txt}`);
   }
-  return res.json(); // Returns { id: "..." }
+  return res.json(); 
 }
 
 // --- LOGIC HELPERS ---
