@@ -207,18 +207,47 @@ app.post("/api/create", cpUpload, async (req, res) => {
         console.log(`[IMPORT] Import ${importId} pending.`);
 
         // D. Build Reference Table
-        if (parsed.rows.length > 0) {
-          const firstRow = parsed.rows[0];
-          let tableRows = "";
-          parsed.headers.forEach(header => {
-            if (header !== idColumn) {
-              const syntax = `{{user.profile.${header}}}`;
-              const value = firstRow[header] || "-";
-              tableRows += `<tr><td style="padding:5px; border:1px solid #ccc;">${header}</td><td style="padding:5px; border:1px solid #ccc;"><code>${syntax}</code></td><td style="padding:5px; border:1px solid #ccc;">${value}</td></tr>`;
-            }
-          });
-          fieldMergeTable = `<h3>Field Merge Reference</h3><table style="width:100%; border-collapse:collapse;"><tr><th style="text-align:left; border:1px solid #ccc;">Attribute</th><th style="text-align:left; border:1px solid #ccc;">Syntax</th><th style="text-align:left; border:1px solid #ccc;">Row 1 Value</th></tr>${tableRows}</table><hr>`;
+if (parsed.rows.length > 0) {
+      const firstRow = parsed.rows[0];
+      
+      let tableRows = "";
+      parsed.headers.forEach((header, index) => {
+        if (header !== idColumn) {
+          const syntax = `{{user.profile.${header}}}`;
+          const value = firstRow[header] || "-";
+          // Alternate row background for readability
+          const bg = index % 2 === 0 ? "#ffffff" : "#f9f9f9";
+          
+          tableRows += `
+            <tr style="background-color:${bg};">
+              <td style="padding:10px; border-bottom:1px solid #eee; color:#333;"><strong>${header}</strong></td>
+              <td style="padding:10px; border-bottom:1px solid #eee; font-family:monospace; color:#0056b3;">${syntax}</td>
+              <td style="padding:10px; border-bottom:1px solid #eee; color:#666;">${value}</td>
+            </tr>`;
         }
+      });
+
+      fieldMergeTable = `
+        <div style="margin-top:20px; font-family: sans-serif;">
+          <h3 style="margin-bottom:10px; color:#333;">Field Merge Reference</h3>
+          <div style="overflow-x:auto; border:1px solid #eee; border-radius:6px;">
+            <table style="width:100%; border-collapse:collapse; font-size:14px;">
+              <thead>
+                <tr style="background-color:#f4f6f8; text-align:left;">
+                  <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Attribute</th>
+                  <th style="padding:10px; border-bottom:2px solid #ddd; width:40%;">Syntax</th>
+                  <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Sample Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${tableRows}
+              </tbody>
+            </table>
+          </div>
+          <p style="font-size:12px; color:#999; margin-top:5px;">*Use the syntax above in your news post templates to dynamically insert these values.</p>
+        </div>
+      `;
+    }
       }
     }
 
@@ -252,9 +281,22 @@ app.post("/api/create", cpUpload, async (req, res) => {
       accessorIDs: userIds
     });
 
-    const contentHTML = `${fieldMergeTable}${title}<hr>${taskListHTML}`;
-    
-    await sb("POST", `/channels/${channelRes.id}/posts`, {
+    let contentHTML = "";
+
+    // 1. Add Intro / Action Items First
+    if (taskListHTML) {
+      contentHTML += taskListHTML;
+    } else {
+      // Fallback if no tasks: just show the title as a header or a placeholder
+      contentHTML += `<p>Please review the details below.</p>`; 
+    }
+
+    // 2. Add Divider and Field Merge Table at the Bottom
+    if (fieldMergeTable) {
+      contentHTML += `<br><hr style="border:0; border-top:1px solid #eee; margin: 20px 0;">${fieldMergeTable}`;
+    }
+
+    const postRes = await sb("POST", `/channels/${channelRes.id}/posts`, {
       contents: { 
         en_US: { 
           title: title, 
