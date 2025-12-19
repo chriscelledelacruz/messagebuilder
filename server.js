@@ -1,8 +1,8 @@
-const { Blob } = require("buffer");
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
-// REMOVED: const FormData = require("form-data"); (We use native Node.js FormData now)
+const FormData = require("form-data"); 
+const { Blob } = require("buffer"); // Required for Native FormData compatibility
 require("dotenv").config();
 
 const app = express();
@@ -10,10 +10,8 @@ const app = express();
 app.set('etag', false);
 app.disable('view cache');
 
-// Increase limit for large CSVs
 app.use(express.json({ limit: '50mb' })); 
 
-// Configure Multer to accept both file types
 const upload = multer({ storage: multer.memoryStorage() });
 const cpUpload = upload.fields([{ name: 'taskCsv', maxCount: 1 }, { name: 'profileCsv', maxCount: 1 }]);
 
@@ -40,14 +38,12 @@ async function sb(method, path, body) {
   while (retries > 0) {
     const res = await fetch(url, options);
     
-    // Rate Limit Handling
     if (res.status === 429) {
       await delay(2000);
       retries--;
       continue;
     }
     
-    // FIX: Handle "204 No Content" to prevent crashes
     if (res.status === 204) return {}; 
 
     if (!res.ok) {
@@ -60,14 +56,12 @@ async function sb(method, path, body) {
   throw new Error("API Timeout");
 }
 
-// --- NEW: API Helper for File Uploads (Native Node.js Version) ---
-// --- UPDATED: Safe Upload Helper for Vercel (Fixes JSON Error) ---
-// --- UPDATED: Robust Upload Helper (Handles Buffers & Blobs) ---
+// --- SAFE UPLOAD HELPER ---
 async function sbUpload(path, buffer, filename) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const form = new FormData();
   
-  // FIX: Wrap buffer in a Blob to satisfy Native FormData requirements
+  // Wrap buffer in a Blob for native Node.js fetch compatibility
   const blob = new Blob([buffer], { type: 'text/csv' });
   form.append('file', blob, filename);
 
@@ -75,8 +69,7 @@ async function sbUpload(path, buffer, filename) {
     method: 'POST',
     headers: {
       "Authorization": `Basic ${STAFFBASE_TOKEN}`,
-      // Note: When using Native FormData + fetch, do NOT set Content-Type manually.
-      // The fetch client generates the boundary automatically.
+      // Do NOT set Content-Type manually; fetch handles boundary
     },
     body: form,
     duplex: 'half' // Required for Node.js 18+
@@ -84,18 +77,13 @@ async function sbUpload(path, buffer, filename) {
 
   const res = await fetch(url, options);
 
-  // 1. Handle "204 No Content" (Success but empty)
-  if (res.status === 204) {
-    return { id: null };
-  }
+  if (res.status === 204) return { id: null };
 
-  // 2. Handle Errors
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`Upload Failed ${res.status}: ${txt}`);
   }
 
-  // 3. Safe JSON Parse
   const text = await res.text();
   return text ? JSON.parse(text) : {}; 
 }
@@ -167,7 +155,7 @@ app.post("/api/verify-users", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 2. CREATE POST (With CSV Import)
+// 2. CREATE POST
 app.post("/api/create", cpUpload, async (req, res) => {
   try {
     let { verifiedUsers, title, department, storeIds: rawStoreIds } = req.body;
@@ -181,79 +169,64 @@ app.post("/api/create", cpUpload, async (req, res) => {
       const parsed = parseCSV(file.buffer);
       
       if (parsed.headers.length > 0) {
-        // Detect ID column (External ID / Store ID)
         let idColumn = parsed.headers.find(h => /store\s*id|external\s*id|id/i.test(h)) || parsed.headers[0];
-
-        // Build Mapping
         const mapping = {};
         mapping["externalId"] = idColumn;
 
         parsed.headers.forEach(h => {
           if (h !== idColumn) {
-            // HEADER MUST MATCH PROFILE FIELD ID
             mapping[`profile-field:${h}`] = h;
           }
         });
 
-        console.log("[IMPORT] Starting CSV Import...", mapping);
+        console.log("[IMPORT] Triggering CSV Import...", mapping);
 
-        // A. Upload
         const uploadRes = await sbUpload("/users/imports", file.buffer, file.originalname);
         const importId = uploadRes.id;
 
-        // B. Configure
-        await sb("PUT", `/users/imports/${importId}/config`, {
+        // --- FIX: USE PATCH INSTEAD OF PUT ---
+        await sb("PATCH", `/users/imports/${importId}/config`, {
           delta: true,
           separator: parsed.separator,
           mapping: mapping
         });
 
-        // C. Run
         await sb("PATCH", `/users/imports/${importId}`, { state: "IMPORT_PENDING" });
-        console.log(`[IMPORT] Import ${importId} pending.`);
+        console.log(`[IMPORT] Started import ${importId}`);
 
-        // D. Build Reference Table
-if (parsed.rows.length > 0) {
-      const firstRow = parsed.rows[0];
-      
-      let tableRows = "";
-      parsed.headers.forEach((header, index) => {
-        if (header !== idColumn) {
-          const syntax = `{{user.profile.${header}}}`;
-          const value = firstRow[header] || "-";
-          // Alternate row background for readability
-          const bg = index % 2 === 0 ? "#ffffff" : "#f9f9f9";
-          
-          tableRows += `
-            <tr style="background-color:${bg};">
-              <td style="padding:10px; border-bottom:1px solid #eee; color:#333;"><strong>${header}</strong></td>
-              <td style="padding:10px; border-bottom:1px solid #eee; font-family:monospace; color:#0056b3;">${syntax}</td>
-              <td style="padding:10px; border-bottom:1px solid #eee; color:#666;">${value}</td>
-            </tr>`;
+        if (parsed.rows.length > 0) {
+          const firstRow = parsed.rows[0];
+          let tableRows = "";
+          parsed.headers.forEach((header, index) => {
+            if (header !== idColumn) {
+              const syntax = `{{user.profile.${header}}}`;
+              const value = firstRow[header] || "-";
+              const bg = index % 2 === 0 ? "#ffffff" : "#f9f9f9";
+              tableRows += `
+                <tr style="background-color:${bg};">
+                  <td style="padding:10px; border-bottom:1px solid #eee; color:#333;"><strong>${header}</strong></td>
+                  <td style="padding:10px; border-bottom:1px solid #eee; font-family:monospace; color:#0056b3;">${syntax}</td>
+                  <td style="padding:10px; border-bottom:1px solid #eee; color:#666;">${value}</td>
+                </tr>`;
+            }
+          });
+          fieldMergeTable = `
+            <div style="margin-top:20px; font-family: sans-serif;">
+              <h3 style="margin-bottom:10px; color:#333;">Field Merge Reference</h3>
+              <div style="overflow-x:auto; border:1px solid #eee; border-radius:6px;">
+                <table style="width:100%; border-collapse:collapse; font-size:14px;">
+                  <thead>
+                    <tr style="background-color:#f4f6f8; text-align:left;">
+                      <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Attribute</th>
+                      <th style="padding:10px; border-bottom:2px solid #ddd; width:40%;">Syntax</th>
+                      <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Sample Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>${tableRows}</tbody>
+                </table>
+              </div>
+            </div>`;
         }
-      });
-
-      fieldMergeTable = `
-        <div style="margin-top:20px; font-family: sans-serif;">
-          <h3 style="margin-bottom:10px; color:#333;">Field Merge Reference</h3>
-          <div style="overflow-x:auto; border:1px solid #eee; border-radius:6px;">
-            <table style="width:100%; border-collapse:collapse; font-size:14px;">
-              <thead>
-                <tr style="background-color:#f4f6f8; text-align:left;">
-                  <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Attribute</th>
-                  <th style="padding:10px; border-bottom:2px solid #ddd; width:40%;">Syntax</th>
-                  <th style="padding:10px; border-bottom:2px solid #ddd; width:30%;">Sample Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${tableRows}
-              </tbody>
-            </table>
-          </div>
-          <p style="font-size:12px; color:#999; margin-top:5px;">*Use the syntax above in your news post templates to dynamically insert these values.</p>
-        </div>
-      `;
-    }
       }
     }
 
@@ -268,7 +241,6 @@ if (parsed.rows.length > 0) {
        // logic for pre-verified object if needed
     }
     
-    // Check for Tasks
     let taskListHTML = "";
     if (req.files && req.files['taskCsv']) {
        const taskRows = parseCSV(req.files['taskCsv'][0].buffer).rows;
@@ -288,21 +260,12 @@ if (parsed.rows.length > 0) {
     });
 
     let contentHTML = "";
+    if (taskListHTML) contentHTML += taskListHTML;
+    else contentHTML += `<p>Please review the details below.</p>`; 
 
-    // 1. Add Intro / Action Items First
-    if (taskListHTML) {
-      contentHTML += taskListHTML;
-    } else {
-      // Fallback if no tasks: just show the title as a header or a placeholder
-      contentHTML += `<p>Please review the details below.</p>`; 
-    }
+    if (fieldMergeTable) contentHTML += `<br><hr style="border:0; border-top:1px solid #eee; margin: 20px 0;">${fieldMergeTable}`;
 
-    // 2. Add Divider and Field Merge Table at the Bottom
-    if (fieldMergeTable) {
-      contentHTML += `<br><hr style="border:0; border-top:1px solid #eee; margin: 20px 0;">${fieldMergeTable}`;
-    }
-
-    const postRes = await sb("POST", `/channels/${channelRes.id}/posts`, {
+    await sb("POST", `/channels/${channelRes.id}/posts`, {
       contents: { 
         en_US: { 
           title: title, 
@@ -321,7 +284,7 @@ if (parsed.rows.length > 0) {
   }
 });
 
-// 3. GET ITEMS (Restored)
+// 3. GET ITEMS
 app.get("/api/items", async (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache');
   try {
@@ -347,22 +310,19 @@ app.get("/api/items", async (req, res) => {
              userCount: inst.accessorIDs ? inst.accessorIDs.length : 0
            };
            
-           // Fetch post details for depth
            try {
              const posts = await sb("GET", `/channels/${inst.id}/posts?limit=1`);
              if (posts.data && posts.data.length > 0) {
                const p = posts.data[0];
                if (p.published) item.status = "Published";
                else if (p.planned) item.status = "Scheduled";
-               
                item.department = p.contents?.en_US?.kicker || item.department;
+               
                const teaser = p.contents?.en_US?.teaser || "";
                const countMatch = teaser.match(/Targeted Stores:\s*(\d+)/);
                if(countMatch) item.userCount = countMatch[1];
              }
-           } catch(e) {
-             // Ignore 204/404 on sub-fetch
-           }
+           } catch(e) {}
            items.push(item);
         }
       }
@@ -377,12 +337,16 @@ app.get("/api/items", async (req, res) => {
   }
 });
 
-// 4. DELETE (Restored)
+// 4. DELETE
 app.delete("/api/delete/:id", async (req, res) => {
   try { await sb("DELETE", `/installations/${req.params.id}`); res.json({ success: true }); } 
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.use(express.static(path.join(__dirname, "public")));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running`));
+// Needed for Vercel
+module.exports = app;
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`🚀 Server running`));
+}
