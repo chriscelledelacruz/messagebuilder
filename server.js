@@ -153,6 +153,7 @@ app.post("/api/verify-users", async (req, res) => {
 // 2. CREATE ADHOC POST & TASKS
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
+
     // Debug Incoming Data
     console.log("[CREATE] Payload:", { 
       hasFile: !!req.file, 
@@ -222,14 +223,21 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     }
     // --- NEW SECTION END ---
 
+    // --- UPDATE START: ADD OPS GROUP VISIBILITY ---
+    const OPS_GROUP_ID = "692a1bc3f912873d71f98e39";
+    
+    // Combine targeted users with the Ops Group ID
+    const allAccessorIDs = [...userIds, OPS_GROUP_ID];
+    // --- UPDATE END ---
+
     // A. Create Channel
-    const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
+const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
       externalID: metaExternalID, 
       config: {
         localization: { en_US: { title: title }, de_DE: { title: title } }
       },
-      accessorIDs: userIds
+      accessorIDs: allAccessorIDs // Updated to include Ops Group
     });
     
     const channelId = channelRes.id;
