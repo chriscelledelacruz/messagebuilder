@@ -20,9 +20,16 @@ const STAFFBASE_TOKEN = process.env.STAFFBASE_TOKEN;
 const STAFFBASE_SPACE_ID = process.env.STAFFBASE_SPACE_ID;
 const HIDDEN_ATTRIBUTE_KEY = process.env.HIDDEN_ATTRIBUTE_KEY;
 
+// --- CONFIG: MANDATORY OPS IDs ---
+const FIXED_OPS_IDS = [
+  "691ca9ba71a3fe45bbe2c8ba", 
+  "691e295f4808c62fcbda1638", 
+  "691e2976bae4ad46ecc44b37"
+];
+
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- API HELPER (UPDATED to support custom headers) ---
+// --- API HELPER ---
 async function sb(method, path, body, customHeaders = {}) {
   const url = `${STAFFBASE_BASE_URL}${path}`;
   const options = {
@@ -30,7 +37,7 @@ async function sb(method, path, body, customHeaders = {}) {
     headers: {
       "Authorization": `Basic ${STAFFBASE_TOKEN}`, 
       "Content-Type": "application/json",
-      ...customHeaders // Merge in any custom headers
+      ...customHeaders 
     }
   };
   if (body) options.body = JSON.stringify(body);
@@ -67,34 +74,32 @@ function cleanText(text) {
     .trim();
 }
 
-// --- NEW: FETCH OPS GROUP MEMBERS DYNAMICALLY ---
 async function getOpsGroupMembers() {
   const OPS_GROUP_ID = "692a1bc3f912873d71f98e39";
   try {
     console.log(`[OPS] Fetching members for group: ${OPS_GROUP_ID}`);
-    
-    // SCIM Filter: groups eq "ID"
     const filter = encodeURIComponent(`groups eq "${OPS_GROUP_ID}"`);
-    
-    // Staffbase Search often requires a specific Accept header
-    const headers = {
-        "Accept": "application/vnd.staffbase.accessors.users-search.v1+json"
-    };
-
+    const headers = { "Accept": "application/vnd.staffbase.accessors.users-search.v1+json" };
     const res = await sb("GET", `/users/search?filter=${filter}`, null, headers);
-    
-    if (res.data) {
-        console.log(`[OPS] Found ${res.data.length} Ops members.`);
-        return res.data;
-    }
+    if (res.data) return res.data;
     return [];
   } catch (e) {
     console.warn("[OPS] Failed to fetch Ops members:", e.message);
-    return []; // Fail safe: return empty list so the rest of the process continues
+    return [];
   }
 }
 
-async function getAllUsersMap() {
+// --- CACHED USER MAP (Sustainable Optimization) ---
+let cachedUserMap = null;
+let userMapLastFetch = 0;
+const USER_MAP_TTL = 1000 * 60 * 15; // Cache for 15 minutes
+
+async function getAllUsersMap(forceRefresh = false) {
+  if (!forceRefresh && cachedUserMap && (Date.now() - userMapLastFetch < USER_MAP_TTL)) {
+    return cachedUserMap;
+  }
+
+  console.log("[CACHE] Refreshing User Map...");
   const userMap = new Map(); 
   let offset = 0; const limit = 100;
   
@@ -118,6 +123,9 @@ async function getAllUsersMap() {
       if (offset % 1000 === 0) await delay(200); 
     } catch (e) { break; }
   }
+  
+  cachedUserMap = userMap;
+  userMapLastFetch = Date.now();
   return userMap;
 }
 
@@ -180,15 +188,14 @@ app.post("/api/verify-users", async (req, res) => {
 // 2. CREATE ADHOC POST & TASKS
 app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   try {
-
-    // Debug Incoming Data
     console.log("[CREATE] Payload:", { 
       hasFile: !!req.file, 
       title: req.body.title, 
-      dept: req.body.department 
+      dept: req.body.department,
+      deadline: req.body.deadline
     });
 
-    let { verifiedUsers, title, department } = req.body;
+    let { verifiedUsers, title, department, deadline, manualTasks } = req.body;
 
     if (!department || department === 'undefined' || department.trim() === '') {
         department = "Uncategorized";
@@ -204,7 +211,6 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
        if (typeof storeIds === 'string') try { storeIds = JSON.parse(storeIds); } catch(e) {}
        
        if (storeIds && storeIds.length > 0) {
-         console.log("Fallback: Resolving raw store IDs...");
          const userMap = await getAllUsersMap();
          verifiedUsers = [];
          for(const id of storeIds) {
@@ -221,54 +227,87 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
     const storeUserIds = verifiedUsers.map(u => u.id);
     const storeIds = verifiedUsers.map(u => u.csvId);
 
-    // --- UPDATE START: DYNAMICALLY FETCH OPS USERS ---
+    // --- VISIBILITY: Combine Store Users + Ops Group + Fixed IDs ---
     const opsUsers = await getOpsGroupMembers();
     const opsUserIds = opsUsers.map(u => u.id);
     
-    // Combine Store Users + Ops Users (Use Set to prevent duplicates)
-    const allAccessorIDs = [...new Set([...storeUserIds, ...opsUserIds])];
+    // Merge all IDs and deduplicate
+    const allAccessorIDs = [...new Set([
+      ...storeUserIds, 
+      ...opsUserIds, 
+      ...FIXED_OPS_IDS 
+    ])];
     
-    console.log(`[CREATE] Visibility: ${storeUserIds.length} Stores + ${opsUserIds.length} Ops Members = ${allAccessorIDs.length} Total`);
-    // --- UPDATE END ---
+    console.log(`[CREATE] Accessor Count: ${allAccessorIDs.length}`);
 
     const now = Date.now();
-    const metaExternalID = `adhoc-${now}`;
+    constSK = `adhoc-${now}`;
 
-    // Tasks parsing
-    let tasks = [];
-    let taskListHTML = "";
+    // --- TASK AGGREGATION ---
+    let allTasks = [];
     
+    // 1. From CSV
     if (req.file) {
-      tasks = parseTaskCSV(req.file.buffer);
-      if (tasks.length > 0) {
+      allTasks = allTasks.concat(parseTaskCSV(req.file.buffer));
+    }
+
+    // 2. From Manual Input (Dynamic Form)
+    if (manualTasks) {
+      try {
+        const parsedManual = JSON.parse(manualTasks);
+        if (Array.isArray(parsedManual)) {
+          // Normalize dates
+          parsedManual.forEach(t => {
+            if (t.dueDate) t.dueDate = new Date(t.dueDate).toISOString();
+          });
+          allTasks = allTasks.concat(parsedManual);
+        }
+      } catch (e) {
+        console.warn("Failed to parse manual tasks:", e);
+      }
+    }
+
+    // Generate Task HTML for Post Body
+    let taskListHTML = "";
+    if (allTasks.length > 0) {
         taskListHTML = "<h3>Action Items</h3><ul>";
-        tasks.forEach(t => {
+        allTasks.forEach(t => {
           let dateDisplay = "";
           if (t.dueDate) {
              const d = new Date(t.dueDate);
+             // Format date simply
              dateDisplay = ` <span style="color:#666; font-size:0.9em;">(Due: ${d.toLocaleDateString()})</span>`;
           }
           taskListHTML += `<li><strong>${t.title}</strong><br>${t.description || ""}${dateDisplay}</li>`;
         });
         taskListHTML += "</ul>";
-      }
+    }
+
+    // --- CHANNEL NAMING: Category + Deadline ---
+    // If no deadline, fallback to existing behavior or just Category
+    let channelName = title; // Default to Post Title if fail
+    if (deadline) {
+      channelName = `${department} - ${deadline}`;
+    } else {
+      channelName = `${department} - No Deadline`;
     }
 
     // A. Create Channel
     const channelRes = await sb("POST", `/spaces/${STAFFBASE_SPACE_ID}/installations`, {
       pluginID: "news",
-      externalID: metaExternalID, 
+      externalID: now.toString(), 
       config: {
-        localization: { en_US: { title: title }, de_DE: { title: title } }
+        localization: { en_US: { title: channelName },de_DE: { title: channelName } }
       },
-      accessorIDs: allAccessorIDs // Passing valid USER IDs only
+      accessorIDs: allAccessorIDs
     });
     
     const channelId = channelRes.id;
 
     // B. Create Post
     const contentHTML = `${title}<hr>${taskListHTML}`;
-    const contentTeaser = `Category: ${department}; Targeted Stores: ${storeUserIds.length}`
+    const contentTeaser = `Category: ${department}; Targeted Stores: ${storeUserIds.length}; Deadline: ${deadline || 'None'}`;
+    
     const postRes = await sb("POST", `/channels/${channelId}/posts`, {
       contents: { 
         en_US: { 
@@ -280,21 +319,19 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
       }
     });
 
-    // C. Handle Tasks
+    // C. Distribute Tasks
     let taskCount = 0;
-    if (req.file) {
-      const tasks = parseTaskCSV(req.file.buffer);
-      if (tasks.length > 0) {
+    if (allTasks.length > 0) {
         const projectMap = await discoverProjectsByStoreIds(storeIds);
         const installationIds = Object.values(projectMap);
-        const chunkedInsts = [];
-        for (let i=0; i<installationIds.length; i+=5) chunkedInsts.push(installationIds.slice(i,i+5));
+        constTc = [];
+        for (let i=0; i<installationIds.length; i+=5) Tc.push(installationIds.slice(i,i+5));
 
-        for (const chunk of chunkedInsts) {
+        for (const chunk of Tc) {
           await Promise.all(chunk.map(async (instId) => {
             try {
               const listRes = await sb("POST", `/tasks/${instId}/lists`, { name: title });
-              for (const t of tasks) {
+              for (const t of allTasks) {
                 await sb("POST", `/tasks/${instId}/task`, {
                   taskListId: listRes.id,
                   title: t.title,
@@ -307,8 +344,7 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
             } catch(e) {}
           }));
         }
-        taskCount = tasks.length * installationIds.length;
-      }
+        taskCount = allTasks.length * installationIds.length;
     }
 
     res.json({ success: true, channelId, postId: postRes.id, taskCount });
@@ -319,13 +355,28 @@ app.post("/api/create", upload.single("taskCsv"), async (req, res) => {
   }
 });
 
-// 3. GET PAST SUBMISSIONS
+// 3. GET PAST SUBMISSIONS (With Store ID Filter)
 app.get("/api/items", async (req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   
   try {
+    const { storeId } = req.query;
+    let targetUserId = null;
+
+    // If filtering by Store ID, verify the store exists and get its User ID
+    if (storeId) {
+       const userMap = await getAllUsersMap(); // Uses cache if available
+       const user = userMap.get(String(storeId));
+       if (user) {
+         targetUserId = user.id;
+       } else {
+         // If store ID doesn't exist, return empty immediately
+         return res.json({ items: [] });
+       }
+    }
+
     const items = [];
     let offset = 0; const limit = 100;
 
@@ -336,77 +387,57 @@ app.get("/api/items", async (req, res) => {
       for (const inst of result.data) {
         if (inst.pluginID !== 'news') continue;
 
+        // --- FILTER LOGIC ---
+        // If a target store is requested, check if it's in the accessors
+        if (targetUserId) {
+            if (!inst.accessorIDs || !inst.accessorIDs.includes(targetUserId)) {
+                continue; 
+            }
+        }
+
         let item = null;
         const title = inst.config?.localization?.en_US?.title || "Untitled";
-        const extID = inst.externalID || "";
         
-       const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
-       const dateStr = inst.createdAt || inst.created || new Date().toISOString();
-    
-        if (extID.startsWith('adhoc')) {
-          item = {
+        // Basic Metadata
+        const defaultUserCount = inst.accessorIDs ? inst.accessorIDs.length : 0;
+        const dateStr = inst.createdAt || inst.created || new Date().toISOString();
+        
+        // Note: Title might now look like "Marketing - 2024-12-25" based on new logic.
+        // We still fetch the post to get the "Human" title if possible, or parse metadata.
+        
+        item = {
             channelId: inst.id,
-            title: title,
+            title: title, // This is the Channel Name
             department: "Uncategorized", 
             userCount: defaultUserCount,
             createdAt: dateStr,
             status: "Draft"
-          };
-        }
-        else if (title.startsWith('[external]')) {
-          const match = title.match(/^\[external\][^:]+:(\d+):([^:]*)::(.*?) - (.+)$/);
-          if (match) {
-            item = {
-              channelId: inst.id,
-              title: match[4],
-              department: match[3],
-              userCount: parseInt(match[1], 10),
-              createdAt: dateStr,
-              status: "Draft"
-            };
-          }
-        }
+        };
 
-        if (item) {
-          try {
+        // Try to enrich with Post data (slows it down, but necessary for current UI)
+        try {
             const posts = await sb("GET", `/channels/${item.channelId}/posts?limit=1`);
             if (posts.data && posts.data.length > 0) {
               const p = posts.data[0];
+              item.title = p.contents?.en_US?.title || item.title; // Use Post title for display
               
               const teaserText = p.contents?.en_US?.teaser || "";
               const kickerText = p.contents?.en_US?.kicker || "";
-              const rawContent = p.contents?.en_US?.content || "";
-              const plainBodyText = cleanText(rawContent);
 
-              let deptMatch = teaserText.match(/(?:Category|Department):\s*([^;]+)/i);
-              
-              if (deptMatch && deptMatch[1]) {
-                  item.department = deptMatch[1].trim(); 
-              } 
-              else if (kickerText) {
-                  item.department = kickerText.trim();
-              }
+              // Extract Dept
+              if (kickerText) item.department = kickerText.trim();
               else {
-                  deptMatch = plainBodyText.match(/(?:Category|Department):\s*([^\n\r]*?)(?=\s*(?:Targeted|User Count|$))/i);
-                  if (deptMatch && deptMatch[1]) item.department = deptMatch[1].trim();
-              }
-
-              let countMatch = teaserText.match(/Targeted Stores:\s*(\d+)/i);
-              
-              if (countMatch && countMatch[1]) {
-                  item.userCount = parseInt(countMatch[1], 10);
-              } 
-              else {
-                  countMatch = plainBodyText.match(/Targeted Stores:\s*(\d+)/i);
-                  if (countMatch && countMatch[1]) item.userCount = parseInt(countMatch[1], 10);
+                  const deptMatch =QlText.match(/(?:Category|Department):\s*([^;]+)/i);
+                  if (deptMatch) item.department = deptMatch[1].trim();
               }
               
+              // Extract Status
               if (p.published) item.status = "Published";
               else if (p.planned) item.status = "Scheduled";
             }
-          } catch(e) { console.error("Task Error:", e); throw e; }
-          items.push(item);
-        }
+        } catch(e) {} // Ignore post fetch errors
+
+        items.push(item);
       }
 
       if (result.data.length < limit) break;
